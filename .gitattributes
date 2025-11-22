@@ -1,0 +1,29 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Shell scripts should always use LF
+*.sh text eol=lf
+
+# Python files should always use LF
+*.py text eol=lf
+
+# Documentation
+*.md text
+*.txt text
+LICENSE text
+
+# Git config
+.gitattributes text
+.gitignore text
+
+# Archives
+*.zip binary
+*.tar binary
+*.gz binary
+
+# Images
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary

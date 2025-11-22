@@ -1,0 +1,9 @@
+# Ignore personal Claude Code settings
+settings.json
+settings.local.json
+
+# Ignore conversation history
+history/
+
+# Only keep project-level development guide
+!CLAUDE.md
