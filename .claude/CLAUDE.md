@@ -40,6 +40,27 @@ Use `examples/test-notification.sh` for basic testing.
 3. **Path Handling**: Always use `SCRIPT_DIR` in hook scripts for portability
 4. **Socket Path**: Currently hardcoded to `/tmp/claude-notifier.sock`
 
+### UI Design Lessons (V3 Card Development)
+
+**Layout Principles:**
+- Keep secondary info (time, session) in footer, not header - reduces visual clutter
+- Use "at" instead of ":" for event-time separator (e.g., "Notification at 15:08") - clearer reading
+- Footer text alpha should be ≥70% for readability (40-50% is too faint)
+- Icon placement matters: header icon (event type) provides quick visual context
+
+**GTK Widget Gotchas:**
+- `set_ellipsize(3)` alone won't work - must set `set_max_width_chars()` too
+- `pack_start` with `hexpand=True` vs `pack_end` affects alignment significantly
+- Text alpha in Pango markup: use `<span alpha="70%">` not CSS opacity
+
+**Development Workflow:**
+- Config file values override DEFAULT_CONFIG - must delete/update config when changing defaults
+- Always kill old daemon before testing new code: `pkill -f daemon.py`
+- Keep multiple card versions (V0, V1, V2, V3) during iteration - easier to A/B compare
+
+**Key Mistake to Avoid:**
+- Don't put too much info in one line - split header/footer clearly for better visual hierarchy
+
 ## Common Tasks
 
 ### Adding New Notification Types
