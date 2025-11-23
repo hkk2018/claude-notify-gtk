@@ -16,7 +16,7 @@ Independent GTK-based notification system for Claude Code on Linux, featuring a 
 - **Auto-positioning**: Initially appears in the right corner, out of your work area
 - **Adjustable Transparency**: Cycle through 95%, 85%, 75%, 65%, and 100% opacity
 - **Sound Alerts**: Different sounds for different notification types (warnings, errors, completions)
-- **Auto-close**: Individual notifications automatically close after 30 seconds
+- **Persistent Notifications**: Notifications remain in the queue until manually closed, allowing you to review history
 - **Detailed Information**: Shows project name, session ID, timestamp, working directory, and message
 - **Visual Urgency**: Critical notifications (permissions, errors) have distinct red styling
 
@@ -139,11 +139,11 @@ Hook configuration is stored in `~/.claude/settings.json`:
 
 Edit [src/daemon.py](src/daemon.py) to customize:
 
-- **Window size**: Modify `set_default_size(400, 600)` in `setup_window()` (line 116)
-- **Opacity levels**: Change the `opacities` list in `toggle_opacity()` (line 320)
-- **Auto-close timeout**: Modify `GLib.timeout_add_seconds(30, ...)` in `NotificationCard.__init__()` (line 74)
-- **Colors and styling**: Edit the CSS in `apply_styles()` (line 209-269)
-- **Socket path**: Change `SOCKET_PATH` constant (line 20)
+- **Window size**: Modify `set_default_size(400, 600)` in `setup_window()`
+- **Opacity levels**: Change the `opacities` list in `toggle_opacity()`
+- **Colors and styling**: Edit the CSS in `apply_styles()`
+- **Socket path**: Change `SOCKET_PATH` constant
+- **Notification persistence**: Notifications now persist until manually closed for better message history tracking
 
 ## Troubleshooting
 

@@ -16,8 +16,70 @@ import subprocess
 import os
 import socket
 import threading
+from pathlib import Path
 
 SOCKET_PATH = "/tmp/claude-notifier.sock"
+CONFIG_DIR = Path.home() / ".config" / "claude-notify-gtk"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+# 預設設定
+DEFAULT_CONFIG = {
+    "window": {
+        "width": 400,
+        "height": 600,
+        "min_width": 300,
+        "min_height": 400,
+        "resizable": True,
+        "position": "top-right",
+        "remember_position": True,
+        "remember_size": True
+    },
+    "appearance": {
+        "opacity": 0.95,
+        "font_family": "Sans",
+        "font_size_title": 13,
+        "font_size_body": 11,
+        "card_border_radius": 8,
+        "card_border_width": 2
+    },
+    "behavior": {
+        "sound_enabled": True,
+        "auto_hide_empty": False,
+        "max_notifications": 50,
+        "scroll_to_newest": True
+    },
+    "notification_content": {
+        "show_timestamp": True,
+        "show_full_path": False,
+        "show_session_id": True,
+        "time_format": "%Y-%m-%d %H:%M:%S"
+    }
+}
+
+def load_config():
+    """載入設定檔，如果不存在則創建預設設定"""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+            # 合併使用者設定和預設設定（深度合併）
+            config = DEFAULT_CONFIG.copy()
+            for section, values in user_config.items():
+                if section in config and isinstance(config[section], dict):
+                    config[section].update(values)
+                else:
+                    config[section] = values
+            return config
+        except Exception as e:
+            print(f"Warning: Failed to load config: {e}")
+            return DEFAULT_CONFIG.copy()
+    else:
+        # 創建預設設定檔
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(DEFAULT_CONFIG, f, indent=2, ensure_ascii=False)
+        print(f"Created default config at: {CONFIG_FILE}")
+        return DEFAULT_CONFIG.copy()
 
 
 class NotificationCard(Gtk.Box):
@@ -60,28 +122,293 @@ class NotificationCard(Gtk.Box):
         message_label.set_xalign(0)
         message_label.set_selectable(True)  # 可選取文字
         message_label.get_style_context().add_class("notification-body")
+        # 增加訊息內容的 padding，讓文字不要太貼邊框
+        message_label.set_margin_start(12)
+        message_label.set_margin_end(12)
+        message_label.set_margin_top(8)
+        message_label.set_margin_bottom(8)
 
-        # 組裝
-        self.set_margin_start(8)
-        self.set_margin_end(8)
-        self.set_margin_top(8)
-        self.set_margin_bottom(8)
+        # 組裝（增加更多 padding 讓內容不要太緊）
+        self.set_margin_start(20)
+        self.set_margin_end(20)
+        self.set_margin_top(16)
+        self.set_margin_bottom(16)
 
         self.pack_start(header, False, False, 0)
         self.pack_start(message_label, True, True, 0)
 
-        # 30 秒後自動關閉
-        GLib.timeout_add_seconds(30, self.auto_close)
+        # 通知不自動消失，讓使用者手動清除或保留訊息佇列
 
     def on_close(self, widget=None):
         """關閉通知"""
         if self.on_close_callback:
             self.on_close_callback(self)
 
-    def auto_close(self):
-        """自動關閉"""
-        self.on_close()
-        return False  # 不重複執行
+
+class SettingsDialog(Gtk.Dialog):
+    """設定對話框"""
+
+    def __init__(self, parent, config):
+        super().__init__(title="Settings", transient_for=parent, flags=0)
+        self.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OK, Gtk.ResponseType.OK
+        )
+
+        self.parent = parent  # 保存父視窗引用，用於即時預覽
+        self.config = config
+        self.original_config = json.loads(json.dumps(config))  # 深拷貝原始設定
+        self.set_default_size(450, 400)
+        self.set_border_width(10)
+
+        # 加入 "Reset to Default" 按鈕（放在左側）
+        reset_button = Gtk.Button(label="Reset to Default")
+        reset_button.connect("clicked", self.on_reset_to_default)
+        action_area = self.get_action_area()
+        action_area.pack_start(reset_button, False, False, 0)
+        action_area.set_child_secondary(reset_button, True)  # 放在左側
+
+        # 創建內容區域
+        box = self.get_content_area()
+        box.set_spacing(12)
+
+        # 使用 Notebook 分頁管理不同類別的設定
+        notebook = Gtk.Notebook()
+        box.pack_start(notebook, True, True, 0)
+
+        # 頁面1: 外觀設定
+        appearance_page = self.create_appearance_page()
+        notebook.append_page(appearance_page, Gtk.Label(label="Appearance"))
+
+        # 頁面2: 視窗設定
+        window_page = self.create_window_page()
+        notebook.append_page(window_page, Gtk.Label(label="Window"))
+
+        # 頁面3: 行為設定
+        behavior_page = self.create_behavior_page()
+        notebook.append_page(behavior_page, Gtk.Label(label="Behavior"))
+
+        # 連接信號以實現即時預覽
+        self.connect_preview_signals()
+
+        self.show_all()
+
+    def create_appearance_page(self):
+        """創建外觀設定頁面"""
+        grid = Gtk.Grid()
+        grid.set_column_spacing(12)
+        grid.set_row_spacing(8)
+        grid.set_border_width(12)
+
+        row = 0
+
+        # 透明度調整
+        label = Gtk.Label(label="Opacity:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        opacity_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.5, 1.0, 0.05)
+        opacity_scale.set_value(self.config["appearance"]["opacity"])
+        opacity_scale.set_hexpand(True)
+        opacity_scale.set_value_pos(Gtk.PositionType.RIGHT)
+        opacity_scale.set_digits(2)
+        grid.attach(opacity_scale, 1, row, 2, 1)
+        self.opacity_scale = opacity_scale
+        row += 1
+
+        # 標題字體大小
+        label = Gtk.Label(label="Title Font Size:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        title_font_spin = Gtk.SpinButton()
+        title_font_spin.set_range(8, 24)
+        title_font_spin.set_increments(1, 2)
+        title_font_spin.set_value(self.config["appearance"]["font_size_title"])
+        grid.attach(title_font_spin, 1, row, 1, 1)
+        self.title_font_spin = title_font_spin
+        row += 1
+
+        # 內容字體大小
+        label = Gtk.Label(label="Body Font Size:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        body_font_spin = Gtk.SpinButton()
+        body_font_spin.set_range(8, 20)
+        body_font_spin.set_increments(1, 2)
+        body_font_spin.set_value(self.config["appearance"]["font_size_body"])
+        grid.attach(body_font_spin, 1, row, 1, 1)
+        self.body_font_spin = body_font_spin
+        row += 1
+
+        # 卡片圓角
+        label = Gtk.Label(label="Card Border Radius:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        radius_spin = Gtk.SpinButton()
+        radius_spin.set_range(0, 20)
+        radius_spin.set_increments(1, 2)
+        radius_spin.set_value(self.config["appearance"]["card_border_radius"])
+        grid.attach(radius_spin, 1, row, 1, 1)
+        self.radius_spin = radius_spin
+        row += 1
+
+        return grid
+
+    def create_window_page(self):
+        """創建視窗設定頁面"""
+        grid = Gtk.Grid()
+        grid.set_column_spacing(12)
+        grid.set_row_spacing(8)
+        grid.set_border_width(12)
+
+        row = 0
+
+        # 視窗寬度
+        label = Gtk.Label(label="Window Width:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        width_spin = Gtk.SpinButton()
+        width_spin.set_range(300, 800)
+        width_spin.set_increments(10, 50)
+        width_spin.set_value(self.config["window"]["width"])
+        grid.attach(width_spin, 1, row, 1, 1)
+        self.width_spin = width_spin
+        row += 1
+
+        # 視窗高度
+        label = Gtk.Label(label="Window Height:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        height_spin = Gtk.SpinButton()
+        height_spin.set_range(400, 1200)
+        height_spin.set_increments(10, 50)
+        height_spin.set_value(self.config["window"]["height"])
+        grid.attach(height_spin, 1, row, 1, 1)
+        self.height_spin = height_spin
+        row += 1
+
+        return grid
+
+    def create_behavior_page(self):
+        """創建行為設定頁面"""
+        grid = Gtk.Grid()
+        grid.set_column_spacing(12)
+        grid.set_row_spacing(8)
+        grid.set_border_width(12)
+
+        row = 0
+
+        # 音效開關
+        label = Gtk.Label(label="Enable Sound:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        sound_switch = Gtk.Switch()
+        sound_switch.set_active(self.config["behavior"]["sound_enabled"])
+        sound_switch.set_halign(Gtk.Align.START)  # 靠左對齊，不擴展
+        grid.attach(sound_switch, 1, row, 1, 1)
+        self.sound_switch = sound_switch
+        row += 1
+
+        # 最大通知數量
+        label = Gtk.Label(label="Max Notifications:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        max_notif_spin = Gtk.SpinButton()
+        max_notif_spin.set_range(10, 100)
+        max_notif_spin.set_increments(5, 10)
+        max_notif_spin.set_value(self.config["behavior"]["max_notifications"])
+        grid.attach(max_notif_spin, 1, row, 1, 1)
+        self.max_notif_spin = max_notif_spin
+        row += 1
+
+        return grid
+
+    def get_updated_config(self):
+        """獲取更新後的設定"""
+        config = self.config.copy()
+
+        # 更新外觀設定
+        config["appearance"]["opacity"] = self.opacity_scale.get_value()
+        config["appearance"]["font_size_title"] = int(self.title_font_spin.get_value())
+        config["appearance"]["font_size_body"] = int(self.body_font_spin.get_value())
+        config["appearance"]["card_border_radius"] = int(self.radius_spin.get_value())
+
+        # 更新視窗設定
+        config["window"]["width"] = int(self.width_spin.get_value())
+        config["window"]["height"] = int(self.height_spin.get_value())
+
+        # 更新行為設定
+        config["behavior"]["sound_enabled"] = self.sound_switch.get_active()
+        config["behavior"]["max_notifications"] = int(self.max_notif_spin.get_value())
+
+        return config
+
+    def connect_preview_signals(self):
+        """連接控件信號以實現即時預覽"""
+        # 透明度滑桿
+        self.opacity_scale.connect("value-changed", self.on_preview_change)
+        # 字體大小
+        self.title_font_spin.connect("value-changed", self.on_preview_change)
+        self.body_font_spin.connect("value-changed", self.on_preview_change)
+        # 卡片圓角
+        self.radius_spin.connect("value-changed", self.on_preview_change)
+        # 視窗大小
+        self.width_spin.connect("value-changed", self.on_preview_change)
+        self.height_spin.connect("value-changed", self.on_preview_change)
+
+    def on_preview_change(self, widget):
+        """當設定改變時，即時預覽效果"""
+        # 獲取當前設定值
+        opacity = self.opacity_scale.get_value()
+        font_size_title = int(self.title_font_spin.get_value())
+        font_size_body = int(self.body_font_spin.get_value())
+        card_border_radius = int(self.radius_spin.get_value())
+        width = int(self.width_spin.get_value())
+        height = int(self.height_spin.get_value())
+
+        # 應用到父視窗
+        self.parent.opacity = opacity
+
+        # 更新暫時的設定（用於重新生成 CSS）
+        self.parent.config["appearance"]["opacity"] = opacity
+        self.parent.config["appearance"]["font_size_title"] = font_size_title
+        self.parent.config["appearance"]["font_size_body"] = font_size_body
+        self.parent.config["appearance"]["card_border_radius"] = card_border_radius
+        self.parent.config["window"]["width"] = width
+        self.parent.config["window"]["height"] = height
+
+        # 調整視窗大小
+        self.parent.resize(width, height)
+
+        # 重新應用樣式（CSS 中包含 opacity）
+        self.parent.apply_styles()
+
+    def restore_original_settings(self):
+        """恢復原始設定"""
+        # 恢復父視窗的設定
+        self.parent.config = json.loads(json.dumps(self.original_config))
+        self.parent.opacity = self.original_config["appearance"]["opacity"]
+
+        # 恢復視窗大小
+        orig_width = self.original_config["window"]["width"]
+        orig_height = self.original_config["window"]["height"]
+        self.parent.resize(orig_width, orig_height)
+
+        # 重新應用樣式（CSS 中包含 opacity）
+        self.parent.apply_styles()
+
+    def on_reset_to_default(self, button):
+        """重置所有設定為預設值"""
+        # 更新所有控件的值為預設值
+        self.opacity_scale.set_value(DEFAULT_CONFIG["appearance"]["opacity"])
+        self.title_font_spin.set_value(DEFAULT_CONFIG["appearance"]["font_size_title"])
+        self.body_font_spin.set_value(DEFAULT_CONFIG["appearance"]["font_size_body"])
+        self.radius_spin.set_value(DEFAULT_CONFIG["appearance"]["card_border_radius"])
+        self.width_spin.set_value(DEFAULT_CONFIG["window"]["width"])
+        self.height_spin.set_value(DEFAULT_CONFIG["window"]["height"])
+        self.sound_switch.set_active(DEFAULT_CONFIG["behavior"]["sound_enabled"])
+        self.max_notif_spin.set_value(DEFAULT_CONFIG["behavior"]["max_notifications"])
+
+        # 控件的 value-changed 信號會自動觸發 on_preview_change，所以不需要手動調用
 
 
 class NotificationContainer(Gtk.Window):
@@ -90,8 +417,11 @@ class NotificationContainer(Gtk.Window):
     def __init__(self):
         super().__init__(title="Claude Code Notifications")
 
+        # 載入設定
+        self.config = load_config()
+
         self.notifications = []
-        self.opacity = 0.95  # 預設透明度
+        self.opacity = self.config["appearance"]["opacity"]  # 從設定讀取初始透明度
 
         # 拖拉相關變數
         self.drag_start_x = 0
@@ -107,14 +437,29 @@ class NotificationContainer(Gtk.Window):
         self.start_socket_server()
 
     def setup_window(self):
-        """設定視窗屬性"""
+        """設定視窗屬性（從設定檔讀取）"""
+        win_config = self.config["window"]
+
         self.set_decorated(False)  # 無邊框
         self.set_keep_above(True)  # 保持在最上層
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
         self.set_type_hint(Gdk.WindowTypeHint.DOCK)
-        self.set_default_size(400, 600)
-        self.set_opacity(self.opacity)
+
+        # 視窗大小（從設定讀取）
+        self.set_default_size(win_config["width"], win_config["height"])
+
+        # 可調整大小
+        self.set_resizable(win_config["resizable"])
+        if win_config["resizable"]:
+            # 設定最小尺寸
+            self.set_size_request(win_config["min_width"], win_config["min_height"])
+
+        # 設定 RGBA visual 以支援透明度
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
 
     def create_ui(self):
         """建立 UI"""
@@ -143,11 +488,11 @@ class NotificationContainer(Gtk.Window):
         title_label.set_hexpand(True)
         title_label.get_style_context().add_class("header-title")
 
-        # 透明度調整按鈕
-        opacity_button = Gtk.Button(label=f"{int(self.opacity * 100)}%")
-        opacity_button.connect("clicked", self.toggle_opacity)
-        opacity_button.get_style_context().add_class("opacity-button")
-        self.opacity_button = opacity_button
+        # 設定按鈕
+        settings_button = Gtk.Button.new_from_icon_name("preferences-system", Gtk.IconSize.BUTTON)
+        settings_button.set_relief(Gtk.ReliefStyle.NONE)
+        settings_button.set_tooltip_text("Settings")
+        settings_button.connect("clicked", self.open_settings_dialog)
 
         # 清除全部按鈕
         clear_button = Gtk.Button(label="Clear All")
@@ -160,7 +505,7 @@ class NotificationContainer(Gtk.Window):
         minimize_button.connect("clicked", lambda w: self.hide())
 
         header.pack_start(title_label, True, True, 0)
-        header.pack_start(opacity_button, False, False, 0)
+        header.pack_start(settings_button, False, False, 0)
         header.pack_start(clear_button, False, False, 0)
         header.pack_start(minimize_button, False, False, 0)
 
@@ -205,68 +550,72 @@ class NotificationContainer(Gtk.Window):
         self.move(x, y)
 
     def apply_styles(self):
-        """套用 CSS 樣式"""
-        css = b"""
-        window {
-            background-color: rgba(30, 30, 46, 0.95);
-            border: 2px solid #89b4fa;
-            border-radius: 8px;
-        }
+        """套用 CSS 樣式（從設定讀取字體大小等參數）"""
+        app_config = self.config["appearance"]
 
-        .header {
+        # 動態生成 CSS，使用設定的字體大小和透明度
+        css = f"""
+        window {{
+            background-color: rgba(30, 30, 46, 1);
+            border: {app_config["card_border_width"]}px solid #89b4fa;
+            border-radius: {app_config["card_border_radius"]}px;
+            opacity: {app_config["opacity"]};
+        }}
+
+        .header {{
             background-color: rgba(17, 17, 27, 0.8);
-        }
+        }}
 
-        .header:hover {
+        .header:hover {{
             background-color: rgba(17, 17, 27, 0.9);
-        }
+        }}
 
-        .header-title {
-            font-size: 12px;
+        .header-title {{
+            font-size: {app_config["font_size_title"]}px;
             font-weight: bold;
             color: #cdd6f4;
-        }
+        }}
 
-        .opacity-button, .clear-button {
-            font-size: 10px;
+        .opacity-button, .clear-button {{
+            font-size: {app_config["font_size_body"] - 1}px;
             padding: 4px 8px;
-        }
+        }}
 
-        .notification-normal {
+        .notification-normal {{
             background-color: rgba(30, 30, 46, 0.9);
             border: 1px solid #89b4fa;
-            border-radius: 6px;
+            border-radius: {app_config["card_border_radius"]}px;
             margin: 4px;
-        }
+        }}
 
-        .notification-critical {
+        .notification-critical {{
             background-color: rgba(30, 30, 46, 0.9);
             border: 2px solid #f38ba8;
-            border-radius: 6px;
+            border-radius: {app_config["card_border_radius"]}px;
             margin: 4px;
-        }
+        }}
 
-        .notification-title {
-            font-size: 12px;
+        .notification-title {{
+            font-size: {app_config["font_size_title"]}px;
             font-weight: bold;
             color: #cdd6f4;
-        }
+        }}
 
-        .notification-critical .notification-title {
+        .notification-critical .notification-title {{
             color: #f38ba8;
-        }
+        }}
 
-        .notification-body {
-            font-size: 10px;
+        .notification-body {{
+            font-size: {app_config["font_size_body"]}px;
             color: #bac2de;
-        }
+        }}
 
-        .close-button {
+        .close-button {{
             min-width: 16px;
             min-height: 16px;
             padding: 2px;
-        }
-        """
+        }}
+        """.encode('utf-8')
 
         css_provider = Gtk.CssProvider()
         css_provider.load_from_data(css)
@@ -316,13 +665,9 @@ class NotificationContainer(Gtk.Window):
         return False
 
     def toggle_opacity(self, widget):
-        """切換透明度"""
-        opacities = [0.95, 0.85, 0.75, 0.65, 1.0]
-        current_index = opacities.index(self.opacity) if self.opacity in opacities else 0
-        next_index = (current_index + 1) % len(opacities)
-        self.opacity = opacities[next_index]
-        self.set_opacity(self.opacity)
-        self.opacity_button.set_label(f"{int(self.opacity * 100)}%")
+        """切換透明度（已棄用，改用設定對話框）"""
+        # 這個方法已不再使用，透明度調整移到設定對話框
+        pass
 
     def clear_all(self, widget):
         """清除所有通知"""
@@ -330,6 +675,58 @@ class NotificationContainer(Gtk.Window):
             self.notification_box.remove(child)
         self.notifications.clear()
         self.hide()
+
+    def open_settings_dialog(self, widget):
+        """打開設定對話框"""
+        dialog = SettingsDialog(self, self.config)
+        response = dialog.run()
+
+        if response == Gtk.ResponseType.OK:
+            # 獲取更新後的設定
+            new_config = dialog.get_updated_config()
+
+            # 保存設定到檔案
+            try:
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(new_config, f, indent=2, ensure_ascii=False)
+
+                # 更新當前設定
+                self.config = new_config
+                self.opacity = new_config["appearance"]["opacity"]
+
+                # 應用新設定（CSS 中包含 opacity）
+                self.apply_styles()
+
+                # 提示需要重啟才能完全生效
+                info_dialog = Gtk.MessageDialog(
+                    transient_for=self,
+                    flags=0,
+                    message_type=Gtk.MessageType.INFO,
+                    buttons=Gtk.ButtonsType.OK,
+                    text="Settings saved"
+                )
+                info_dialog.format_secondary_text(
+                    "Some settings (like window size) require restarting the daemon to take full effect."
+                )
+                info_dialog.run()
+                info_dialog.destroy()
+
+            except Exception as e:
+                error_dialog = Gtk.MessageDialog(
+                    transient_for=self,
+                    flags=0,
+                    message_type=Gtk.MessageType.ERROR,
+                    buttons=Gtk.ButtonsType.OK,
+                    text="Failed to save settings"
+                )
+                error_dialog.format_secondary_text(str(e))
+                error_dialog.run()
+                error_dialog.destroy()
+        else:
+            # 取消時恢復原始設定
+            dialog.restore_original_settings()
+
+        dialog.destroy()
 
     def add_notification(self, title, message, urgency="normal", sound=None):
         """新增通知"""
@@ -421,44 +818,44 @@ class NotificationContainer(Gtk.Window):
         # 時間戳
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 根據通知類型設定標題、緊急程度和音效
+        # 根據通知類型設定標題、緊急程度和音效（標題包含專案名稱）
         if notification_type == "permission_prompt":
-            title = "🔐 Claude Code - Permission"
+            title = f"🔐 [{project_name}] Permission"
             urgency = "critical"
             sound = "dialog-warning"
         elif notification_type == "idle_prompt":
-            title = "⏸️  Claude Code - Waiting"
+            title = f"⏸️  [{project_name}] Waiting"
             urgency = "critical"
             sound = "dialog-question"
         elif notification_type == "auth_success":
-            title = "✅ Claude Code - Auth Success"
+            title = f"✅ [{project_name}] Auth Success"
             urgency = "normal"
             sound = "complete"
         elif "waiting for your input" in message.lower():
-            title = "⏸️  Claude Code - Waiting"
+            title = f"⏸️  [{project_name}] Waiting"
             urgency = "critical"
             sound = "dialog-question"
         elif any(word in message.lower() for word in ["error", "failed", "exception"]):
-            title = "❌ Claude Code - Error"
+            title = f"❌ [{project_name}] Error"
             urgency = "critical"
             sound = "dialog-error"
         elif any(word in message.lower() for word in ["permission", "approve"]):
-            title = "🔐 Claude Code - Permission"
+            title = f"🔐 [{project_name}] Permission"
             urgency = "critical"
             sound = "dialog-warning"
         else:
-            title = "✅ Claude Code - Completed"
+            title = f"✅ [{project_name}] Completed"
             urgency = "normal"
             sound = "message-new-instant"
 
-        # 組合訊息內容
-        body_lines = [f"Project: {project_name}"]
+        # 組合訊息內容（Session 放在最前面，如果有的話）
+        body_lines = []
         if session_id:
-            body_lines.append(f"Session: {session_id}")
-        body_lines.append(f"Time: {timestamp}")
+            body_lines.append(f"📌 Session: {session_id}")
+        body_lines.append(f"🕐 {timestamp}")
         if cwd:
-            body_lines.append(f"Dir: {cwd}")
-        body_lines.append("")
+            body_lines.append(f"📁 {cwd}")
+        body_lines.append("")  # 空行分隔
         body_lines.append(message)
 
         body = "\n".join(body_lines)
