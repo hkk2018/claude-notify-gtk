@@ -39,7 +39,7 @@ DEFAULT_CONFIG = {
         "font_family": "Sans",
         "font_size_title": 13,
         "font_size_body": 11,
-        "card_border_radius": 8,
+        "card_border_radius": 3,
         "card_border_width": 2
     },
     "behavior": {
@@ -83,7 +83,7 @@ def load_config():
 
 
 class NotificationCard(Gtk.Box):
-    """單一通知卡片"""
+    """單一通知卡片 (V0 - 原始版本)"""
 
     def __init__(self, title, message, urgency="normal", on_close=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -138,6 +138,346 @@ class NotificationCard(Gtk.Box):
         self.pack_start(message_label, True, True, 0)
 
         # 通知不自動消失，讓使用者手動清除或保留訊息佇列
+
+    def on_close(self, widget=None):
+        """關閉通知"""
+        if self.on_close_callback:
+            self.on_close_callback(self)
+
+
+class NotificationCardV1(Gtk.Box):
+    """通知卡片 V1 - 精簡設計版本"""
+
+    def __init__(self, title, message, urgency="normal", on_close=None, metadata=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self.on_close_callback = on_close
+        self.urgency = urgency
+        metadata = metadata or {}
+
+        # 設定樣式
+        if urgency == "critical":
+            self.get_style_context().add_class("notification-critical")
+        else:
+            self.get_style_context().add_class("notification-normal")
+
+        # === Header: icon + type + 時間（右側小字）+ 關閉按鈕 ===
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header.set_margin_start(12)
+        header.set_margin_end(8)
+        header.set_margin_top(8)
+        header.set_margin_bottom(4)
+
+        # Type 標籤（精簡版標題）
+        type_label = Gtk.Label()
+        type_label.set_markup(f"<b>{title}</b>")
+        type_label.set_halign(Gtk.Align.START)
+        type_label.get_style_context().add_class("notification-title")
+
+        # 時間標籤（小字，灰色）
+        time_label = Gtk.Label()
+        timestamp = metadata.get("timestamp", "")
+        time_label.set_markup(f'<span size="small" alpha="70%">{timestamp}</span>')
+        time_label.set_halign(Gtk.Align.END)
+        time_label.set_hexpand(True)
+
+        # 關閉按鈕
+        close_button = Gtk.Button.new_from_icon_name("window-close", Gtk.IconSize.BUTTON)
+        close_button.set_relief(Gtk.ReliefStyle.NONE)
+        close_button.connect("clicked", self.on_close)
+        close_button.get_style_context().add_class("close-button")
+
+        header.pack_start(type_label, False, False, 0)
+        header.pack_start(time_label, True, True, 0)
+        header.pack_start(close_button, False, False, 0)
+
+        # === Body: 訊息主體（突出顯示）===
+        message_label = Gtk.Label(label=message)
+        message_label.set_line_wrap(True)
+        message_label.set_halign(Gtk.Align.START)
+        message_label.set_valign(Gtk.Align.START)
+        message_label.set_xalign(0)
+        message_label.set_selectable(True)
+        message_label.get_style_context().add_class("notification-body")
+        message_label.set_margin_start(12)
+        message_label.set_margin_end(12)
+        message_label.set_margin_top(4)
+        message_label.set_margin_bottom(8)
+
+        # === Footer: Project + Session（小字灰色）===
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        footer.set_margin_start(12)
+        footer.set_margin_end(12)
+        footer.set_margin_bottom(8)
+
+        footer_parts = []
+        if metadata.get("project"):
+            footer_parts.append(f'📦 {metadata["project"]}')
+        if metadata.get("session"):
+            footer_parts.append(f'Session: {metadata["session"]}')
+
+        if footer_parts:
+            footer_label = Gtk.Label()
+            footer_text = " • ".join(footer_parts)
+            footer_label.set_markup(f'<span size="small" alpha="60%">{footer_text}</span>')
+            footer_label.set_halign(Gtk.Align.START)
+            footer_label.set_ellipsize(3)  # 過長時省略
+            footer.pack_start(footer_label, True, True, 0)
+
+        # 組裝
+        self.set_margin_start(8)
+        self.set_margin_end(8)
+        self.set_margin_top(6)
+        self.set_margin_bottom(6)
+
+        self.pack_start(header, False, False, 0)
+        self.pack_start(message_label, True, True, 0)
+        if footer_parts:
+            self.pack_start(footer, False, False, 0)
+
+    def on_close(self, widget=None):
+        """關閉通知"""
+        if self.on_close_callback:
+            self.on_close_callback(self)
+
+
+class NotificationCardV2(Gtk.Box):
+    """通知卡片 V2 - 完整資訊版本（使用所有可用欄位）"""
+
+    def __init__(self, title, message, urgency="normal", on_close=None, metadata=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self.on_close_callback = on_close
+        self.urgency = urgency
+        metadata = metadata or {}
+
+        # 設定樣式
+        if urgency == "critical":
+            self.get_style_context().add_class("notification-critical")
+        else:
+            self.get_style_context().add_class("notification-normal")
+
+        # === Header: icon + type + 時間（右側，精簡格式）+ 關閉按鈕 ===
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header.set_margin_start(12)
+        header.set_margin_end(8)
+        header.set_margin_top(8)
+        header.set_margin_bottom(4)
+
+        # Type 標籤
+        type_label = Gtk.Label()
+        type_label.set_markup(f"<b>{title}</b>")
+        type_label.set_halign(Gtk.Align.START)
+        type_label.get_style_context().add_class("notification-title")
+
+        # 時間標籤（只顯示時:分，完整時間在 tooltip）
+        time_label = Gtk.Label()
+        timestamp = metadata.get("timestamp", "")
+        if timestamp:
+            time_only = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp[:5]
+            time_label.set_markup(f'<span size="small" alpha="70%">{time_only}</span>')
+            time_label.set_tooltip_text(f'Full time: {timestamp}')
+        time_label.set_halign(Gtk.Align.END)
+        time_label.set_hexpand(True)
+
+        # 關閉按鈕
+        close_button = Gtk.Button.new_from_icon_name("window-close", Gtk.IconSize.BUTTON)
+        close_button.set_relief(Gtk.ReliefStyle.NONE)
+        close_button.connect("clicked", self.on_close)
+        close_button.get_style_context().add_class("close-button")
+
+        header.pack_start(type_label, False, False, 0)
+        header.pack_start(time_label, True, True, 0)
+        header.pack_start(close_button, False, False, 0)
+
+        # === Body: 訊息主體 ===
+        message_label = Gtk.Label(label=message)
+        message_label.set_line_wrap(True)
+        message_label.set_halign(Gtk.Align.START)
+        message_label.set_valign(Gtk.Align.START)
+        message_label.set_xalign(0)
+        message_label.set_selectable(True)
+        message_label.get_style_context().add_class("notification-body")
+        message_label.set_margin_start(12)
+        message_label.set_margin_end(12)
+        message_label.set_margin_top(4)
+        message_label.set_margin_bottom(6)
+
+        # === Footer: 完整資訊（緊湊排列）===
+        footer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        footer.set_margin_start(12)
+        footer.set_margin_end(12)
+        footer.set_margin_bottom(8)
+
+        # 第一行：Project + Hook Event（如果有）
+        line1_parts = []
+        if metadata.get("project"):
+            line1_parts.append(f'📦 {metadata["project"]}')
+        if metadata.get("hook_event"):
+            line1_parts.append(f'⚡ {metadata["hook_event"]}')
+
+        if line1_parts:
+            line1_label = Gtk.Label()
+            line1_label.set_markup(f'<span size="small" alpha="60%">{" • ".join(line1_parts)}</span>')
+            line1_label.set_halign(Gtk.Align.START)
+            line1_label.set_ellipsize(3)
+            footer.pack_start(line1_label, False, False, 0)
+
+        # 第二行：Session（縮短顯示，完整ID在tooltip）
+        if metadata.get("session"):
+            session_label = Gtk.Label()
+            session_short = metadata["session"][:8]
+            session_label.set_markup(f'<span size="small" alpha="50%">🔑 {session_short}...</span>')
+            session_label.set_halign(Gtk.Align.START)
+            session_label.set_tooltip_text(f'Session ID: {metadata["session"]}')
+            footer.pack_start(session_label, False, False, 0)
+
+        # 第三行：Transcript（只顯示檔名）
+        if metadata.get("transcript"):
+            transcript_label = Gtk.Label()
+            transcript_file = metadata["transcript"].split("/")[-1]
+            if len(transcript_file) > 25:
+                transcript_file = transcript_file[:22] + "..."
+            transcript_label.set_markup(f'<span size="x-small" alpha="40%">📄 {transcript_file}</span>')
+            transcript_label.set_halign(Gtk.Align.START)
+            transcript_label.set_tooltip_text(metadata["transcript"])
+            footer.pack_start(transcript_label, False, False, 0)
+
+        # 組裝
+        self.set_margin_start(8)
+        self.set_margin_end(8)
+        self.set_margin_top(6)
+        self.set_margin_bottom(6)
+
+        self.pack_start(header, False, False, 0)
+        self.pack_start(message_label, True, True, 0)
+        if line1_parts or metadata.get("session") or metadata.get("transcript"):
+            self.pack_start(footer, False, False, 0)
+
+    def on_close(self, widget=None):
+        """關閉通知"""
+        if self.on_close_callback:
+            self.on_close_callback(self)
+
+
+class NotificationCardV3(Gtk.Box):
+    """通知卡片 V3 - 優化版面配置"""
+
+    def __init__(self, title, message, urgency="normal", on_close=None, metadata=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self.on_close_callback = on_close
+        self.urgency = urgency
+        metadata = metadata or {}
+
+        # 設定樣式
+        if urgency == "critical":
+            self.get_style_context().add_class("notification-critical")
+        else:
+            self.get_style_context().add_class("notification-normal")
+
+        # === Header: Icon + Project + 關閉按鈕 ===
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header.set_margin_start(12)
+        header.set_margin_end(8)
+        header.set_margin_top(8)
+        header.set_margin_bottom(4)
+
+        # Icon
+        icon = metadata.get("icon", "💬")
+        icon_label = Gtk.Label()
+        icon_label.set_markup(f"{icon}")
+        icon_label.set_halign(Gtk.Align.START)
+
+        # 專案名稱
+        project_name = metadata.get("project", "")
+        project_label = Gtk.Label()
+        project_label.set_markup(f"<b>{project_name}</b>")
+        project_label.set_halign(Gtk.Align.START)
+        project_label.set_hexpand(True)
+        project_label.set_ellipsize(3)  # 過長時省略
+        project_label.set_max_width_chars(30)  # 限制最大寬度
+        project_label.get_style_context().add_class("notification-title")
+
+        # 關閉按鈕
+        close_button = Gtk.Button.new_from_icon_name("window-close", Gtk.IconSize.BUTTON)
+        close_button.set_relief(Gtk.ReliefStyle.NONE)
+        close_button.connect("clicked", self.on_close)
+        close_button.get_style_context().add_class("close-button")
+
+        header.pack_start(icon_label, False, False, 0)
+        header.pack_start(project_label, True, True, 0)
+        header.pack_start(close_button, False, False, 0)
+
+        # === Body: 訊息主體 ===
+        message_label = Gtk.Label(label=message)
+        message_label.set_line_wrap(True)
+        message_label.set_halign(Gtk.Align.START)
+        message_label.set_valign(Gtk.Align.START)
+        message_label.set_xalign(0)
+        message_label.set_selectable(True)
+        message_label.get_style_context().add_class("notification-body")
+        message_label.set_margin_start(12)
+        message_label.set_margin_end(12)
+        message_label.set_margin_top(4)
+        message_label.set_margin_bottom(6)
+
+        # === Footer: Session + Transcript（左側）+ Event at Time（右側）===
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        footer.set_margin_start(12)
+        footer.set_margin_end(12)
+        footer.set_margin_bottom(8)
+
+        # 左側：Session + Transcript（垂直排列）
+        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+
+        # Session（有文字標示）
+        if metadata.get("session"):
+            session_label = Gtk.Label()
+            session_short = metadata["session"][:8]
+            session_label.set_markup(f'<span size="small" alpha="70%">Session: {session_short}...</span>')
+            session_label.set_halign(Gtk.Align.START)
+            session_label.set_tooltip_text(f'Full Session ID: {metadata["session"]}')
+            left_box.pack_start(session_label, False, False, 0)
+
+        # Transcript（有文字標示）
+        if metadata.get("transcript"):
+            transcript_label = Gtk.Label()
+            transcript_file = metadata["transcript"].split("/")[-1]
+            if len(transcript_file) > 20:
+                transcript_file = transcript_file[:17] + "..."
+            transcript_label.set_markup(f'<span size="x-small" alpha="70%">Transcript: {transcript_file}</span>')
+            transcript_label.set_halign(Gtk.Align.START)
+            transcript_label.set_tooltip_text(f'Full path: {metadata["transcript"]}')
+            left_box.pack_start(transcript_label, False, False, 0)
+
+        # 右側：Event at Time
+        event_name = metadata.get("event_name", "")
+        timestamp = metadata.get("timestamp", "")
+        event_time_label = Gtk.Label()
+        if timestamp:
+            time_only = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp[:5]
+            event_time_text = f"{event_name} at {time_only}"
+        else:
+            event_time_text = event_name
+        event_time_label.set_markup(f'<span size="small" alpha="70%">{event_time_text}</span>')
+        event_time_label.set_halign(Gtk.Align.END)
+        event_time_label.set_valign(Gtk.Align.END)
+        event_time_label.set_tooltip_text(f'Full time: {timestamp}' if timestamp else '')
+
+        footer.pack_start(left_box, False, False, 0)
+        footer.pack_end(event_time_label, False, False, 0)
+
+        # 組裝
+        self.set_margin_start(8)
+        self.set_margin_end(8)
+        self.set_margin_top(6)
+        self.set_margin_bottom(6)
+
+        self.pack_start(header, False, False, 0)
+        self.pack_start(message_label, True, True, 0)
+        # Footer 總是顯示（至少有 event at time）
+        self.pack_start(footer, False, False, 0)
 
     def on_close(self, widget=None):
         """關閉通知"""
@@ -697,20 +1037,6 @@ class NotificationContainer(Gtk.Window):
                 # 應用新設定（CSS 中包含 opacity）
                 self.apply_styles()
 
-                # 提示需要重啟才能完全生效
-                info_dialog = Gtk.MessageDialog(
-                    transient_for=self,
-                    flags=0,
-                    message_type=Gtk.MessageType.INFO,
-                    buttons=Gtk.ButtonsType.OK,
-                    text="Settings saved"
-                )
-                info_dialog.format_secondary_text(
-                    "Some settings (like window size) require restarting the daemon to take full effect."
-                )
-                info_dialog.run()
-                info_dialog.destroy()
-
             except Exception as e:
                 error_dialog = Gtk.MessageDialog(
                     transient_for=self,
@@ -728,14 +1054,26 @@ class NotificationContainer(Gtk.Window):
 
         dialog.destroy()
 
-    def add_notification(self, title, message, urgency="normal", sound=None):
-        """新增通知"""
+    def add_notification(self, title, message, urgency="normal", sound=None, metadata=None, card_version=3):
+        """新增通知
+
+        Args:
+            card_version: 0 = V0, 1 = V1, 2 = V2, 3 = V3（優化版面）
+        """
         # 播放音效
         if sound:
             self.play_sound(sound)
 
-        # 建立通知卡片
-        card = NotificationCard(title, message, urgency, self.remove_notification)
+        # 建立通知卡片（根據版本選擇）
+        if card_version == 3:
+            card = NotificationCardV3(title, message, urgency, self.remove_notification, metadata)
+        elif card_version == 2:
+            card = NotificationCardV2(title, message, urgency, self.remove_notification, metadata)
+        elif card_version == 1:
+            card = NotificationCardV1(title, message, urgency, self.remove_notification, metadata)
+        else:
+            card = NotificationCard(title, message, urgency, self.remove_notification)
+
         self.notifications.append(card)
 
         # 加入容器（最新的在最上面）
@@ -804,10 +1142,13 @@ class NotificationContainer(Gtk.Window):
 
     def handle_notification(self, hook_data):
         """處理通知資料"""
+        # 讀取所有可用欄位
         cwd = hook_data.get("cwd", "")
-        message = hook_data.get("message", "Task completed")
+        message = hook_data.get("message", "")  # 不設預設值，保持原樣
         notification_type = hook_data.get("notification_type", "")
         session_id = hook_data.get("session_id", "")
+        hook_event_name = hook_data.get("hook_event_name", "")
+        transcript_path = hook_data.get("transcript_path", "")
 
         # 專案名稱
         if cwd:
@@ -818,37 +1159,65 @@ class NotificationContainer(Gtk.Window):
         # 時間戳
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 根據通知類型設定標題、緊急程度和音效（標題包含專案名稱）
+        # 根據通知類型設定標題、緊急程度和音效
+        # V0/V1/V2 都使用相同的標題邏輯
         if notification_type == "permission_prompt":
-            title = f"🔐 [{project_name}] Permission"
+            title_v0 = f"🔐 [{project_name}] Permission"
+            title_v1 = "🔐 Permission"
             urgency = "critical"
             sound = "dialog-warning"
         elif notification_type == "idle_prompt":
-            title = f"⏸️  [{project_name}] Waiting"
+            title_v0 = f"⏸️  [{project_name}] Waiting"
+            title_v1 = "⏸️ Waiting"
             urgency = "critical"
             sound = "dialog-question"
         elif notification_type == "auth_success":
-            title = f"✅ [{project_name}] Auth Success"
+            title_v0 = f"✅ [{project_name}] Auth Success"
+            title_v1 = "✅ Auth Success"
             urgency = "normal"
             sound = "complete"
         elif "waiting for your input" in message.lower():
-            title = f"⏸️  [{project_name}] Waiting"
+            title_v0 = f"⏸️  [{project_name}] Waiting"
+            title_v1 = "⏸️ Waiting"
             urgency = "critical"
             sound = "dialog-question"
         elif any(word in message.lower() for word in ["error", "failed", "exception"]):
-            title = f"❌ [{project_name}] Error"
+            title_v0 = f"❌ [{project_name}] Error"
+            title_v1 = "❌ Error"
             urgency = "critical"
             sound = "dialog-error"
         elif any(word in message.lower() for word in ["permission", "approve"]):
-            title = f"🔐 [{project_name}] Permission"
+            title_v0 = f"🔐 [{project_name}] Permission"
+            title_v1 = "🔐 Permission"
             urgency = "critical"
             sound = "dialog-warning"
         else:
-            title = f"✅ [{project_name}] Completed"
+            # Fallback: 根據 hook_event_name 判斷 icon
+            if hook_event_name:
+                # 根據 event 名稱給不同 icon
+                event_lower = hook_event_name.lower()
+                if "notification" in event_lower:
+                    icon = "🔔"
+                elif "start" in event_lower or "begin" in event_lower:
+                    icon = "▶️"
+                elif "stop" in event_lower or "end" in event_lower:
+                    icon = "⏹️"
+                elif "pause" in event_lower:
+                    icon = "⏸️"
+                elif "resume" in event_lower:
+                    icon = "▶️"
+                else:
+                    icon = "💬"
+
+                title_v0 = f"{icon} [{project_name}] {hook_event_name}"
+                title_v1 = f"{icon} {hook_event_name}"
+            else:
+                title_v0 = f"💬 [{project_name}] Notification"
+                title_v1 = "💬 Notification"
             urgency = "normal"
             sound = "message-new-instant"
 
-        # 組合訊息內容（Session 放在最前面，如果有的話）
+        # 組合訊息內容（V0 版本：Session 放在最前面，如果有的話）
         body_lines = []
         if session_id:
             body_lines.append(f"📌 Session: {session_id}")
@@ -856,12 +1225,32 @@ class NotificationContainer(Gtk.Window):
         if cwd:
             body_lines.append(f"📁 {cwd}")
         body_lines.append("")  # 空行分隔
-        body_lines.append(message)
+        body_lines.append(message if message else "No message")
 
-        body = "\n".join(body_lines)
+        body_v0 = "\n".join(body_lines)
 
-        # 新增通知
-        self.add_notification(title, body, urgency, sound)
+        # V1/V2/V3 版本：訊息本體 + 完整 metadata
+        body_v1 = message if message else "No message"
+
+        # 從 title_v1 提取 icon 和 event name
+        # title_v1 格式: "icon event_name"
+        title_parts = title_v1.split(" ", 1)
+        event_icon = title_parts[0] if len(title_parts) > 0 else "💬"
+        event_name = title_parts[1] if len(title_parts) > 1 else "Notification"
+
+        metadata = {
+            "project": project_name,
+            "session": session_id,
+            "timestamp": timestamp,
+            "cwd": cwd,
+            "hook_event": hook_event_name,
+            "transcript": transcript_path,
+            "icon": event_icon,
+            "event_name": event_name
+        }
+
+        # 新增通知（使用 V3 版本）
+        self.add_notification(title_v1, body_v1, urgency, sound, metadata, card_version=3)
 
 
 def main():
