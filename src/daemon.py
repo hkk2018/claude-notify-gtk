@@ -9,7 +9,7 @@ Claude Code 通知守護程式
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Gdk
+from gi.repository import Gtk, GLib, Gdk, GdkPixbuf
 import json
 import datetime
 import subprocess
@@ -776,6 +776,9 @@ class NotificationContainer(Gtk.Window):
         # 啟動 socket 伺服器
         self.start_socket_server()
 
+        # 創建系統托盤圖標
+        self.create_tray_icon()
+
     def setup_window(self):
         """設定視窗屬性（從設定檔讀取）"""
         win_config = self.config["window"]
@@ -967,6 +970,53 @@ class NotificationContainer(Gtk.Window):
             css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+
+    def create_tray_icon(self):
+        """創建系統托盤圖標"""
+        # 使用 StatusIcon (GTK3)
+        self.status_icon = Gtk.StatusIcon()
+        self.status_icon.set_from_icon_name("notification-message-im")
+        self.status_icon.set_tooltip_text("Claude Code Notifier")
+        self.status_icon.set_visible(True)
+
+        # 連接事件
+        self.status_icon.connect("activate", self.on_tray_activate)
+        self.status_icon.connect("popup-menu", self.on_tray_popup_menu)
+
+    def on_tray_activate(self, status_icon):
+        """托盤圖標左鍵點擊 - 切換視窗顯示/隱藏"""
+        if self.get_visible():
+            self.hide()
+        else:
+            self.show_all()
+            self.present()
+
+    def on_tray_popup_menu(self, status_icon, button, activate_time):
+        """托盤圖標右鍵選單"""
+        menu = Gtk.Menu()
+
+        # Show/Hide 選項
+        show_item = Gtk.MenuItem(label="Show/Hide Window")
+        show_item.connect("activate", lambda x: self.on_tray_activate(status_icon))
+        menu.append(show_item)
+
+        # 分隔線
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Quit 選項
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", self.on_quit)
+        menu.append(quit_item)
+
+        menu.show_all()
+        menu.popup(None, None, None, None, button, activate_time)
+
+    def on_quit(self, widget):
+        """退出程式"""
+        # 關閉 socket
+        if hasattr(self, 'socket_path') and os.path.exists(self.socket_path):
+            os.unlink(self.socket_path)
+        Gtk.main_quit()
 
     def on_drag_start(self, widget, event):
         """開始拖拉"""
