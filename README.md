@@ -1,7 +1,7 @@
 ---
 title: "claude-notify-gtk"
 description: "Independent GTK-based notification system for Claude Code on Linux"
-last_modified: "2025-11-22 23:54"
+last_modified: "2025-11-24 15:44"
 ---
 
 # claude-notify-gtk
@@ -19,6 +19,8 @@ Independent GTK-based notification system for Claude Code on Linux, featuring a 
 - **Persistent Notifications**: Notifications remain in the queue until manually closed, allowing you to review history
 - **Detailed Information**: Shows project name, session ID, timestamp, working directory, and message
 - **Visual Urgency**: Critical notifications (permissions, errors) have distinct red styling
+- **Click to Focus**: Click on notification cards to automatically focus the corresponding editor window (VSCode, Cursor, or custom)
+- **System Tray Icon**: Minimize to system tray, right-click for quick access
 
 ## Architecture
 
@@ -43,8 +45,9 @@ The system consists of two main components:
 - Linux with GTK 3.0
 - Python 3 with PyGObject (pre-installed on Ubuntu)
 - Claude Code CLI or VSCode extension
+- `xdotool` for focus feature (install: `sudo apt install xdotool`)
 - `paplay` or `aplay` for sound support (optional)
-- `jq` for JSON logging (optional)
+- `jq` for JSON logging and custom focus scripts (optional)
 
 ## Installation
 
@@ -92,6 +95,42 @@ Once installed, the notification system will automatically display notifications
 - **Clear All**: Remove all notifications at once
 - **Minimize**: Hide the window (will reappear when new notifications arrive)
 - **Close Individual**: Click the × button on any notification card
+- **System Tray**: Left-click tray icon to show/hide window, right-click for menu
+
+### Focus Feature
+
+**Click on any notification card to automatically focus the corresponding editor window.**
+
+Configure focus behavior in `~/.config/claude-notify-gtk/focus-mapping.json`:
+
+```json
+{
+  "projects": {
+    "/home/ubuntu/Projects/my-project": {
+      "type": "vscode"
+    }
+  },
+  "default": {
+    "type": "vscode"
+  }
+}
+```
+
+**Supported editor types:**
+- `vscode`: Visual Studio Code
+- `cursor`: Cursor Editor
+- `custom`: Run your own focus script
+
+For advanced configuration and custom focus scripts, see:
+- [Focus Feature Guide](docs/focus-feature-guide.md) - Complete user guide
+- [Focus Mapping Configuration](docs/focus-mapping.md) - Detailed configuration options
+- [Custom Focus Example](examples/custom-focus-example.sh) - Sample custom script
+
+**Quick test:**
+```bash
+# Test focus functionality
+~/Projects/claude-notify-gtk/examples/test-focus.sh
+```
 
 ### Manual Testing
 
@@ -220,6 +259,23 @@ Our Unix socket approach provides:
 - Complete independence from system notification service
 - Full control over notification display and behavior
 - No conflicts with existing notification systems
+
+## Why XDG Autostart (Not systemd)?
+
+GTK desktop applications require access to the X server and graphical session, which systemd user services don't have by default. Using systemd would result in:
+
+- **Authorization errors**: "Authorization required, but no authorization protocol specified"
+- **GTK initialization failures**: Cannot connect to display server
+- **Additional complexity**: Requires manual X server permission setup
+
+XDG Autostart (`~/.config/autostart/*.desktop`) is the standard way to auto-start desktop applications because:
+
+- **Runs in graphical session**: Automatically has access to X server and DBUS
+- **Desktop environment native**: Supported by GNOME, KDE, XFCE, etc.
+- **Zero configuration**: Works out of the box without manual permissions
+- **Standard practice**: Used by most Linux desktop applications
+
+The `setup.sh` script automatically creates the XDG autostart entry for you.
 
 ## License
 

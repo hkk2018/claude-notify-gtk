@@ -13,6 +13,7 @@ from gi.repository import Gtk, GLib, Gdk, GdkPixbuf
 import json
 import datetime
 import subprocess
+import sys
 import os
 import socket
 import threading
@@ -21,6 +22,7 @@ from pathlib import Path
 SOCKET_PATH = "/tmp/claude-notifier.sock"
 CONFIG_DIR = Path.home() / ".config" / "claude-notify-gtk"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+FOCUS_MAPPING_FILE = CONFIG_DIR / "focus-mapping.json"
 
 # 預設設定
 DEFAULT_CONFIG = {
@@ -80,6 +82,327 @@ def load_config():
             json.dump(DEFAULT_CONFIG, f, indent=2, ensure_ascii=False)
         print(f"Created default config at: {CONFIG_FILE}")
         return DEFAULT_CONFIG.copy()
+
+
+class FocusManager:
+    """管理視窗 focus 的類別
+
+    - 載入 focus-mapping.json 設定檔
+    - 根據專案路徑查找對應的 focus 設定
+    - 執行 focus 操作（內建編輯器或自訂指令）
+    """
+
+    # 預設 focus mapping 設定
+    DEFAULT_FOCUS_MAPPING = {
+        "projects": {},
+        "default": {
+            "type": "vscode"
+        },
+        "builtin_editors": {
+            "vscode": {
+                "window_title": "Visual Studio Code",
+                "window_class": "Code"
+            },
+            "cursor": {
+                "window_title": "Cursor",
+                "window_class": "Cursor"
+            }
+        }
+    }
+
+    def __init__(self):
+        """初始化 FocusManager"""
+        self.mapping = self.load_focus_mapping()
+        self.log_file = CONFIG_DIR / "focus-errors.log"
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    def load_focus_mapping(self):
+        """載入 focus mapping 設定檔"""
+        if FOCUS_MAPPING_FILE.exists():
+            try:
+                with open(FOCUS_MAPPING_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Warning: Failed to load focus mapping: {e}")
+                return self.DEFAULT_FOCUS_MAPPING.copy()
+        else:
+            # 創建預設設定檔
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(FOCUS_MAPPING_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.DEFAULT_FOCUS_MAPPING, f, indent=2, ensure_ascii=False)
+            print(f"Created default focus mapping at: {FOCUS_MAPPING_FILE}")
+            return self.DEFAULT_FOCUS_MAPPING.copy()
+
+    def get_focus_config(self, project_path):
+        """根據專案路徑取得 focus 設定
+
+        Args:
+            project_path: 專案路徑（來自通知的 cwd）
+
+        Returns:
+            focus 設定字典
+        """
+        # 查找專案特定設定
+        projects = self.mapping.get("projects", {})
+        if project_path in projects:
+            return projects[project_path]
+
+        # 使用預設設定
+        return self.mapping.get("default", {"type": "vscode"})
+
+    def focus_window(self, notification_data):
+        """執行視窗 focus 操作
+
+        Args:
+            notification_data: 完整的通知資料字典
+
+        Returns:
+            True if successful, False otherwise
+        """
+        cwd = notification_data.get("cwd", "")
+        if not cwd:
+            self.log_error("No cwd in notification data")
+            return False
+
+        # 取得 focus 設定
+        focus_config = self.get_focus_config(cwd)
+        focus_type = focus_config.get("type", "vscode")
+
+        try:
+            if focus_type == "custom":
+                return self.execute_custom_command(focus_config, notification_data)
+            else:
+                return self.focus_builtin_editor(focus_type, focus_config, notification_data)
+        except Exception as e:
+            self.log_error(f"Failed to focus window: {e}")
+            return False
+
+    def focus_builtin_editor(self, editor_type, focus_config, notification_data=None):
+        """Focus 內建編輯器視窗
+
+        Args:
+            editor_type: 編輯器類型（vscode, cursor, 等）
+            focus_config: focus 設定字典
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # 取得內建編輯器的預設設定
+        builtin_editors = self.mapping.get("builtin_editors", {})
+        editor_defaults = builtin_editors.get(editor_type, {})
+
+        # focus_config 中的設定會覆蓋預設值
+        window_title = focus_config.get("window_title") or editor_defaults.get("window_title")
+        window_class = focus_config.get("window_class") or editor_defaults.get("window_class")
+
+        # 優先使用 window_class（更可靠）
+        try:
+            # 確保使用正確的 DISPLAY 環境變數
+            env = os.environ.copy()
+            if not env.get("DISPLAY"):
+                env["DISPLAY"] = ":1"
+
+            # 第一步：使用 xdotool 搜尋視窗 ID
+            if window_class:
+                # 不使用 --limit，取得所有符合的視窗
+                search_cmd = ["xdotool", "search", "--class", window_class]
+            elif window_title:
+                search_cmd = ["xdotool", "search", "--name", window_title]
+            else:
+                self.log_error(f"No window_title or window_class for editor type: {editor_type}")
+                return False
+
+            # 執行搜尋（timeout 2 秒）
+            search_result = subprocess.run(search_cmd, capture_output=True, text=True, timeout=2, env=env)
+            if search_result.returncode != 0:
+                self.log_error(f"xdotool search failed: {search_result.stderr}")
+                return False
+
+            # 取得所有視窗 ID
+            all_window_ids = search_result.stdout.strip().split('\n')
+            if not all_window_ids or all_window_ids[0] == '':
+                self.log_error("No window found")
+                return False
+
+            # 取得專案名稱（用於匹配視窗）
+            project_name = None
+            if notification_data:
+                project_name = notification_data.get("project_name", "")
+
+            # 過濾掉隱藏視窗（只有 class 名稱的視窗，例如只叫 "cursor" 的視窗）
+            # 這些通常是 DevTools 或其他輔助視窗
+            window_id = None
+            candidate_windows = []  # 收集所有候選視窗
+
+            for wid in all_window_ids:
+                try:
+                    name_result = subprocess.run(
+                        ["xdotool", "getwindowname", wid],
+                        capture_output=True,
+                        text=True,
+                        timeout=1,
+                        env=env
+                    )
+                    window_name = name_result.stdout.strip()
+                    window_name_lower = window_name.lower()
+
+                    # 跳過只有 class 名稱的視窗（例如 "cursor", "code" 等）
+                    if window_name_lower == window_class.lower() or window_name_lower == editor_type.lower():
+                        continue
+
+                    # 收集候選視窗
+                    candidate_windows.append((wid, window_name, window_name_lower))
+                except Exception as e:
+                    continue
+
+            if not candidate_windows:
+                self.log_error("No valid editor window found (all windows seem to be helper windows)")
+                return False
+
+            # 如果有專案名稱，優先選擇包含該名稱的視窗
+            if project_name:
+                project_name_lower = project_name.lower()
+                for wid, wname, wname_lower in candidate_windows:
+                    if project_name_lower in wname_lower:
+                        window_id = wid
+                        break
+
+            # 如果沒找到匹配的，使用第一個候選視窗
+            if not window_id:
+                window_id, _, _ = candidate_windows[0]
+
+            # 第二步：使用完整的多步驟 X11 focus 流程
+            # Electron 應用需要多個步驟才能正確 focus
+            try:
+                from Xlib import X, display, Xatom
+                from Xlib.protocol import event
+                import time
+
+                d = display.Display(env.get("DISPLAY", ":1"))
+                root = d.screen().root
+                target_window = d.create_resource_object('window', int(window_id))
+                active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
+
+                # Step 1: WM_CHANGE_STATE (取消最小化)
+                wm_state = d.intern_atom("WM_CHANGE_STATE")
+                ev = event.ClientMessage(
+                    window=target_window,
+                    client_type=wm_state,
+                    data=(32, [1, 0, 0, 0, 0])  # NormalState
+                )
+                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                d.flush()
+                time.sleep(0.1)
+
+                # Step 2: _NET_ACTIVE_WINDOW ClientMessage (請求視窗管理器 focus)
+                current_time = int(time.time() * 1000) & 0xFFFFFFFF
+                ev = event.ClientMessage(
+                    window=target_window,
+                    client_type=active_window_atom,
+                    data=(32, [2, current_time, 0, 0, 0])  # source=2 (pager), timestamp
+                )
+                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                d.flush()
+                time.sleep(0.1)
+
+                # Step 3: 直接設定 _NET_ACTIVE_WINDOW 屬性（確保設定生效）
+                root.change_property(
+                    active_window_atom,
+                    Xatom.WINDOW,
+                    32,
+                    [int(window_id)],
+                    X.PropModeReplace
+                )
+                d.sync()
+                time.sleep(0.1)
+
+                # Step 4: map 視窗（確保可見）
+                target_window.map()
+                d.flush()
+                time.sleep(0.1)
+
+                # Step 5: raise 視窗（移到最上層）
+                target_window.configure(stack_mode=X.Above)
+                d.flush()
+
+                return True
+
+            except ImportError:
+                self.log_error("python3-xlib not installed. Please install: sudo apt install python3-xlib")
+                return False
+            except Exception as e:
+                self.log_error(f"Xlib focus failed: {e}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            self.log_error("xdotool search timed out")
+            return False
+        except FileNotFoundError:
+            self.log_error("xdotool not found. Please install: sudo apt install xdotool")
+            return False
+
+    def execute_custom_command(self, focus_config, notification_data):
+        """執行自訂 focus 指令
+
+        Args:
+            focus_config: focus 設定字典
+            notification_data: 完整的通知資料
+
+        Returns:
+            True if successful, False otherwise
+        """
+        custom_command = focus_config.get("custom_command")
+        if not custom_command:
+            self.log_error("custom_command not specified")
+            return False
+
+        pass_data = focus_config.get("pass_data", True)
+
+        try:
+            if pass_data:
+                # 傳遞通知資料給自訂指令（通過 stdin）
+                json_data = json.dumps(notification_data)
+                result = subprocess.run(
+                    custom_command,
+                    input=json_data,
+                    capture_output=True,
+                    text=True,
+                    shell=True,
+                    timeout=10
+                )
+            else:
+                # 不傳遞資料，只執行指令
+                result = subprocess.run(
+                    custom_command,
+                    capture_output=True,
+                    text=True,
+                    shell=True,
+                    timeout=10
+                )
+
+            if result.returncode == 0:
+                return True
+            else:
+                self.log_error(f"Custom command failed: {result.stderr}")
+                return False
+        except subprocess.TimeoutExpired:
+            self.log_error("Custom command timed out")
+            return False
+        except Exception as e:
+            self.log_error(f"Custom command error: {e}")
+            return False
+
+    def log_error(self, message):
+        """記錄錯誤到日誌檔"""
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_message = f"[{timestamp}] {message}\n"
+        try:
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write(log_message)
+        except Exception as e:
+            print(f"Failed to write to log: {e}")
+        # 同時輸出到 stderr
+        print(f"FocusManager Error: {message}", file=sys.stderr)
 
 
 class NotificationCard(Gtk.Box):
@@ -186,6 +509,7 @@ class NotificationCardV1(Gtk.Box):
         close_button.set_relief(Gtk.ReliefStyle.NONE)
         close_button.connect("clicked", self.on_close)
         close_button.get_style_context().add_class("close-button")
+        self.close_button = close_button  # 保存引用以便點擊檢測
 
         header.pack_start(type_label, False, False, 0)
         header.pack_start(time_label, True, True, 0)
@@ -363,12 +687,14 @@ class NotificationCardV2(Gtk.Box):
 class NotificationCardV3(Gtk.Box):
     """通知卡片 V3 - 優化版面配置"""
 
-    def __init__(self, title, message, urgency="normal", on_close=None, metadata=None):
+    def __init__(self, title, message, urgency="normal", on_close=None, metadata=None, notification_data=None, focus_manager=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         self.on_close_callback = on_close
         self.urgency = urgency
         metadata = metadata or {}
+        self.notification_data = notification_data  # 保存完整通知資料
+        self.focus_manager = focus_manager  # FocusManager 實例
 
         # 設定樣式
         if urgency == "critical":
@@ -376,7 +702,7 @@ class NotificationCardV3(Gtk.Box):
         else:
             self.get_style_context().add_class("notification-normal")
 
-        # === Header: Icon + Project + 關閉按鈕 ===
+        # === Header: Icon + Project ===
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         header.set_margin_start(12)
         header.set_margin_end(8)
@@ -399,15 +725,8 @@ class NotificationCardV3(Gtk.Box):
         project_label.set_max_width_chars(30)  # 限制最大寬度
         project_label.get_style_context().add_class("notification-title")
 
-        # 關閉按鈕
-        close_button = Gtk.Button.new_from_icon_name("window-close", Gtk.IconSize.BUTTON)
-        close_button.set_relief(Gtk.ReliefStyle.NONE)
-        close_button.connect("clicked", self.on_close)
-        close_button.get_style_context().add_class("close-button")
-
         header.pack_start(icon_label, False, False, 0)
         header.pack_start(project_label, True, True, 0)
-        header.pack_start(close_button, False, False, 0)
 
         # === Body: 訊息主體 ===
         message_label = Gtk.Label(label=message)
@@ -468,16 +787,114 @@ class NotificationCardV3(Gtk.Box):
         footer.pack_start(left_box, False, False, 0)
         footer.pack_end(event_time_label, False, False, 0)
 
-        # 組裝
+        # === 左側內容區 ===
+        left_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        left_content.pack_start(header, False, False, 0)
+        left_content.pack_start(message_label, False, False, 0)  # 不擴展，保持緊湊
+        left_content.pack_start(footer, False, False, 0)
+
+        # === 右側 Focus 按鈕區（整個 column 都是按鈕）===
+        right_focus_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        right_focus_area.set_size_request(40, -1)  # 固定寬度 40px
+        right_focus_area.set_halign(Gtk.Align.END)  # 靠右對齊
+
+        if self.focus_manager and self.notification_data:
+            # 整個右側空間都是按鈕
+            self.focus_button = Gtk.Button()
+            self.focus_button.set_relief(Gtk.ReliefStyle.NONE)
+            self.focus_button.get_style_context().add_class("focus-button")
+
+            # 創建一個 box 來放置 icon（垂直置中）
+            icon_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            icon_box.set_valign(Gtk.Align.CENTER)  # icon 垂直置中
+            icon_box.set_halign(Gtk.Align.CENTER)  # icon 水平置中
+
+            # 創建 icon 和 spinner（初始顯示向右箭頭）
+            self.focus_icon = Gtk.Image.new_from_icon_name("go-next", Gtk.IconSize.LARGE_TOOLBAR)
+            self.focus_spinner = Gtk.Spinner()
+
+            # 添加 icon 到 box
+            icon_box.pack_start(self.focus_icon, False, False, 0)
+
+            # 將 icon_box 放入按鈕
+            self.focus_button.add(icon_box)
+            self.focus_button.connect("clicked", self.on_focus_clicked)
+
+            # 保存 icon_box 引用，以便後續切換 icon
+            self.icon_box = icon_box
+
+            right_focus_area.pack_start(self.focus_button, True, True, 0)  # 填滿整個右側空間
+
+        # === 組裝：左右兩區 ===
+        main_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        main_hbox.pack_start(left_content, True, True, 0)  # 左側可擴展
+        main_hbox.pack_start(right_focus_area, False, False, 0)  # 右側固定寬度
+
         self.set_margin_start(8)
         self.set_margin_end(8)
         self.set_margin_top(6)
         self.set_margin_bottom(6)
 
-        self.pack_start(header, False, False, 0)
-        self.pack_start(message_label, True, True, 0)
-        # Footer 總是顯示（至少有 event at time）
-        self.pack_start(footer, False, False, 0)
+        self.pack_start(main_hbox, False, False, 0)
+
+    def on_focus_clicked(self, widget):
+        """Focus icon button 被點擊"""
+        # 切換到 loading 狀態
+        self.set_focus_icon_state("loading")
+
+        # 在背景執行 focus 操作
+        def focus_thread():
+            result = self.focus_manager.focus_window(self.notification_data)
+            # 使用 GLib.idle_add 在主線程更新 UI
+            if result:
+                GLib.idle_add(self.set_focus_icon_state, "success")
+            else:
+                GLib.idle_add(self.set_focus_icon_state, "error")
+
+        thread = threading.Thread(target=focus_thread, daemon=True)
+        thread.start()
+
+    def set_focus_icon_state(self, state):
+        """設定 focus icon 狀態
+
+        Args:
+            state: "idle", "loading", "success", "error"
+        """
+        if not hasattr(self, 'icon_box'):
+            return
+
+        # 移除 icon_box 中的當前 child
+        for child in self.icon_box.get_children():
+            self.icon_box.remove(child)
+
+        if state == "loading":
+            # 顯示 spinner 並啟動
+            self.icon_box.pack_start(self.focus_spinner, False, False, 0)
+            self.focus_spinner.start()
+            self.focus_spinner.show()
+            self.focus_button.set_sensitive(False)  # 禁用按鈕
+        elif state == "success":
+            # 顯示成功 icon
+            success_icon = Gtk.Image.new_from_icon_name("emblem-ok-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+            self.icon_box.pack_start(success_icon, False, False, 0)
+            success_icon.show()
+            self.focus_button.set_sensitive(True)  # 重新啟用按鈕
+            # 3 秒後恢復 idle 狀態
+            GLib.timeout_add_seconds(3, lambda: self.set_focus_icon_state("idle"))
+        elif state == "error":
+            # 顯示錯誤 icon
+            error_icon = Gtk.Image.new_from_icon_name("dialog-error-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+            self.icon_box.pack_start(error_icon, False, False, 0)
+            error_icon.show()
+            self.focus_button.set_sensitive(True)  # 重新啟用按鈕
+            # 3 秒後恢復 idle 狀態
+            GLib.timeout_add_seconds(3, lambda: self.set_focus_icon_state("idle"))
+        else:  # idle
+            # 恢復原本的 icon
+            self.focus_spinner.stop()
+            self.icon_box.pack_start(self.focus_icon, False, False, 0)
+            self.focus_icon.show()
+            self.focus_button.set_sensitive(True)  # 重新啟用按鈕
 
     def on_close(self, widget=None):
         """關閉通知"""
@@ -763,6 +1180,9 @@ class NotificationContainer(Gtk.Window):
         self.notifications = []
         self.opacity = self.config["appearance"]["opacity"]  # 從設定讀取初始透明度
 
+        # 創建 FocusManager 實例
+        self.focus_manager = FocusManager()
+
         # 拖拉相關變數
         self.drag_start_x = 0
         self.drag_start_y = 0
@@ -958,6 +1378,23 @@ class NotificationContainer(Gtk.Window):
             min-height: 16px;
             padding: 2px;
         }}
+
+        .focus-button {{
+            background-color: rgba(137, 180, 250, 0.15);
+            border-left: 2px solid rgba(137, 180, 250, 0.3);
+            border-radius: 0px;
+            padding: 0px;
+            min-width: 40px;
+        }}
+
+        .focus-button:hover {{
+            background-color: rgba(137, 180, 250, 0.25);
+            border-left-color: rgba(137, 180, 250, 0.5);
+        }}
+
+        .focus-button:active {{
+            background-color: rgba(137, 180, 250, 0.35);
+        }}
         """.encode('utf-8')
 
         css_provider = Gtk.CssProvider()
@@ -1104,11 +1541,12 @@ class NotificationContainer(Gtk.Window):
 
         dialog.destroy()
 
-    def add_notification(self, title, message, urgency="normal", sound=None, metadata=None, card_version=3):
+    def add_notification(self, title, message, urgency="normal", sound=None, metadata=None, card_version=3, notification_data=None):
         """新增通知
 
         Args:
             card_version: 0 = V0, 1 = V1, 2 = V2, 3 = V3（優化版面）
+            notification_data: 完整的通知資料（用於 focus 功能）
         """
         # 播放音效
         if sound:
@@ -1116,7 +1554,7 @@ class NotificationContainer(Gtk.Window):
 
         # 建立通知卡片（根據版本選擇）
         if card_version == 3:
-            card = NotificationCardV3(title, message, urgency, self.remove_notification, metadata)
+            card = NotificationCardV3(title, message, urgency, self.remove_notification, metadata, notification_data, self.focus_manager)
         elif card_version == 2:
             card = NotificationCardV2(title, message, urgency, self.remove_notification, metadata)
         elif card_version == 1:
@@ -1127,7 +1565,8 @@ class NotificationContainer(Gtk.Window):
         self.notifications.append(card)
 
         # 加入容器（最新的在最上面）
-        self.notification_box.pack_start(card, False, False, 0)
+        # 使用 expand=False, fill=True 讓卡片填滿容器寬度，但不增加額外高度
+        self.notification_box.pack_start(card, False, True, 0)
         self.notification_box.reorder_child(card, 0)
         card.show_all()
 
@@ -1299,12 +1738,30 @@ class NotificationContainer(Gtk.Window):
             "event_name": event_name
         }
 
+        # 完整的通知資料（用於 focus 功能）
+        notification_data = {
+            "cwd": cwd,
+            "message": message,
+            "notification_type": notification_type,
+            "session_id": session_id,
+            "hook_event_name": hook_event_name,
+            "transcript_path": transcript_path,
+            "project_name": project_name,
+            "timestamp": timestamp
+        }
+
         # 新增通知（使用 V3 版本）
-        self.add_notification(title_v1, body_v1, urgency, sound, metadata, card_version=3)
+        self.add_notification(title_v1, body_v1, urgency, sound, metadata, card_version=3, notification_data=notification_data)
 
 
 def main():
     """主程式"""
+    # 確保 DISPLAY 環境變數存在
+    if not os.environ.get("DISPLAY"):
+        # 嘗試常見的 DISPLAY 值
+        os.environ["DISPLAY"] = ":1"
+        print(f"Warning: DISPLAY not set, using :1")
+
     container = NotificationContainer()
     container.show_all()
     container.hide()  # 一開始隱藏，等有通知才顯示

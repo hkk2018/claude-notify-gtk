@@ -1,0 +1,29 @@
+{
+  "projects": {
+    "/home/ubuntu/Projects/claude-notify-gtk": {
+      "type": "vscode",
+      "window_title": "Visual Studio Code"
+    },
+    "/home/ubuntu/Projects/my-cursor-project": {
+      "type": "cursor"
+    },
+    "/home/ubuntu/Projects/special-project": {
+      "type": "custom",
+      "custom_command": "/home/ubuntu/scripts/focus-tmux.sh",
+      "pass_data": true
+    }
+  },
+  "default": {
+    "type": "vscode"
+  },
+  "builtin_editors": {
+    "vscode": {
+      "window_title": "Visual Studio Code",
+      "window_class": "Code"
+    },
+    "cursor": {
+      "window_title": "Cursor",
+      "window_class": "Cursor"
+    }
+  }
+}
