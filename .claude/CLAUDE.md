@@ -48,6 +48,12 @@ Use `examples/test-notification.sh` for basic testing.
 - Footer text alpha should be ≥70% for readability (40-50% is too faint)
 - Icon placement matters: header icon (event type) provides quick visual context
 
+**Color Coding for Priority:**
+- Time-based color coding helps users identify fresh vs. stale notifications at a glance
+- Color scheme (Catppuccin Mocha): Green (≤5min) → Yellow (5-10min) → Orange (10-20min) → Gray (20+min)
+- Use `foreground` attribute in Pango markup for color, not `alpha` (which affects transparency)
+- Calculate time difference from notification timestamp, not card creation time
+
 **GTK Widget Gotchas:**
 - `set_ellipsize(3)` alone won't work - must set `set_max_width_chars()` too
 - `pack_start` with `hexpand=True` vs `pack_end` affects alignment significantly

@@ -1,7 +1,7 @@
 ---
 title: "claude-notify-gtk"
 description: "Independent GTK-based notification system for Claude Code on Linux"
-last_modified: "2025-11-24 15:44"
+last_modified: "2025-11-25 14:12"
 ---
 
 # claude-notify-gtk
@@ -19,6 +19,11 @@ Independent GTK-based notification system for Claude Code on Linux, featuring a 
 - **Persistent Notifications**: Notifications remain in the queue until manually closed, allowing you to review history
 - **Detailed Information**: Shows project name, session ID, timestamp, working directory, and message
 - **Visual Urgency**: Critical notifications (permissions, errors) have distinct red styling
+- **Time-based Color Coding**: Notification timestamps change color based on age for easy prioritization
+  - **Green** (5 min or less): Fresh, urgent notifications
+  - **Yellow** (5-10 min): Recent notifications
+  - **Orange** (10-20 min): Older notifications
+  - **Gray** (20+ min): Archive notifications
 - **Click to Focus**: Click on notification cards to automatically focus the corresponding editor window (VSCode, Cursor, or custom)
 - **System Tray Icon**: Minimize to system tray, right-click for quick access
 
@@ -137,6 +142,11 @@ For advanced configuration and custom focus scripts, see:
 Send a test notification:
 ```bash
 echo '{"cwd": "/home/user/test", "message": "Test notification", "session_id": "test-123"}' | ~/Projects/claude-notify-gtk/src/client.py
+```
+
+Test time-based color coding (displays notifications with different ages):
+```bash
+~/Projects/claude-notify-gtk/test-time-colors.sh
 ```
 
 ### Notification Types

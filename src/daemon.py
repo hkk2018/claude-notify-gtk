@@ -324,6 +324,39 @@ class FocusManager:
                 # Step 5: raise 視窗（移到最上層）
                 target_window.configure(stack_mode=X.Above)
                 d.flush()
+                time.sleep(0.1)
+
+                # Step 6: 直接設定 keyboard focus（關鍵！）
+                target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+                d.flush()
+                d.sync()
+                time.sleep(0.1)
+
+                # 雙重 Focus 機制（解決 Electron 應用的 focus 問題）
+                #
+                # **問題**：VSCode/Cursor 等 Electron 應用在第一次 focus 時，
+                # 只會 focus 到應用程序本身，而不會 focus 到具體的編輯器視窗。
+                # 第二次點擊才會真正 focus 到目標視窗。
+                #
+                # **解決方案**：在程式中連續執行兩次 focus 流程（Steps 7-8），
+                # 模擬「第二次點擊」的效果，確保一次點擊就能成功 focus。
+                #
+                # Step 7: 再次發送 _NET_ACTIVE_WINDOW ClientMessage
+                current_time = int(time.time() * 1000) & 0xFFFFFFFF
+                ev = event.ClientMessage(
+                    window=target_window,
+                    client_type=active_window_atom,
+                    data=(32, [2, current_time, 0, 0, 0])
+                )
+                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                d.flush()
+                time.sleep(0.05)
+
+                # Step 8: 再次 raise 和 focus
+                target_window.configure(stack_mode=X.Above)
+                target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+                d.flush()
+                d.sync()
 
                 return True
 
@@ -695,6 +728,10 @@ class NotificationCardV3(Gtk.Box):
         metadata = metadata or {}
         self.notification_data = notification_data  # 保存完整通知資料
         self.focus_manager = focus_manager  # FocusManager 實例
+        self.creation_time = datetime.datetime.now()  # 記錄卡片創建時間
+        self.timestamp = metadata.get("timestamp", "")  # 保存時間字串
+        self.timer_id = None  # 用於顏色更新的 timer ID
+        self.event_time_label = None  # 時間標籤的引用（稍後設置）
 
         # 設定樣式
         if urgency == "critical":
@@ -771,21 +808,25 @@ class NotificationCardV3(Gtk.Box):
             left_box.pack_start(transcript_label, False, False, 0)
 
         # 右側：Event at Time
-        event_name = metadata.get("event_name", "")
+        self.event_name = metadata.get("event_name", "")
         timestamp = metadata.get("timestamp", "")
-        event_time_label = Gtk.Label()
+        self.event_time_label = Gtk.Label()
         if timestamp:
             time_only = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp[:5]
-            event_time_text = f"{event_name} at {time_only}"
+            event_time_text = f"{self.event_name} at {time_only}"
+            # 根據時間差獲取顏色
+            time_color = self.get_time_color(timestamp)
         else:
-            event_time_text = event_name
-        event_time_label.set_markup(f'<span size="small" alpha="70%">{event_time_text}</span>')
-        event_time_label.set_halign(Gtk.Align.END)
-        event_time_label.set_valign(Gtk.Align.END)
-        event_time_label.set_tooltip_text(f'Full time: {timestamp}' if timestamp else '')
+            event_time_text = self.event_name
+            time_color = "#6c7086"  # 預設灰色
+
+        self.event_time_label.set_markup(f'<span size="small" foreground="{time_color}">{event_time_text}</span>')
+        self.event_time_label.set_halign(Gtk.Align.END)
+        self.event_time_label.set_valign(Gtk.Align.END)
+        self.event_time_label.set_tooltip_text(f'Full time: {timestamp}' if timestamp else '')
 
         footer.pack_start(left_box, False, False, 0)
-        footer.pack_end(event_time_label, False, False, 0)
+        footer.pack_end(self.event_time_label, False, False, 0)
 
         # === 左側內容區 ===
         left_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -818,7 +859,8 @@ class NotificationCardV3(Gtk.Box):
 
             # 將 icon_box 放入按鈕
             self.focus_button.add(icon_box)
-            self.focus_button.connect("clicked", self.on_focus_clicked)
+            # 使用 button-press-event 而不是 clicked，這樣在窗口沒焦點時也能響應
+            self.focus_button.connect("button-press-event", self.on_focus_clicked)
 
             # 保存 icon_box 引用，以便後續切換 icon
             self.icon_box = icon_box
@@ -837,8 +879,65 @@ class NotificationCardV3(Gtk.Box):
 
         self.pack_start(main_hbox, False, False, 0)
 
-    def on_focus_clicked(self, widget):
-        """Focus icon button 被點擊"""
+        # 啟動顏色更新 timer（5 分鐘後第一次檢查）
+        if self.timestamp and self.event_time_label:
+            self.schedule_next_color_update()
+
+    def get_time_color(self, timestamp_str):
+        """根據時間差返回對應的顏色
+
+        Args:
+            timestamp_str: 時間字串 (格式: "YYYY-MM-DD HH:MM:SS")
+
+        Returns:
+            顏色字串 (hex 格式)
+        """
+        try:
+            # 解析時間戳
+            notification_time = datetime.datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+
+            # 計算時間差（分鐘）- 使用當前時間，這樣顏色會隨時間變化
+            time_diff = (datetime.datetime.now() - notification_time).total_seconds() / 60
+
+            # 根據時間差返回顏色（Catppuccin Mocha 配色）
+            if time_diff <= 5:
+                return "#a6e3a1"  # 綠色，鮮豔（5分鐘內）
+            elif time_diff <= 10:
+                return "#f9e2af"  # 黃色（5-10分鐘）
+            elif time_diff <= 20:
+                return "#fab387"  # 橙色（10-20分鐘）
+            else:
+                return "#6c7086"  # 灰色（20分鐘以上）
+
+            # DEBUG 模式（用於快速測試，使用 1 分鐘單位）：
+            # if time_diff <= 1:
+            #     return "#a6e3a1"  # 綠色，鮮豔（1分鐘內）
+            # elif time_diff <= 2:
+            #     return "#f9e2af"  # 黃色（1-2分鐘）
+            # elif time_diff <= 4:
+            #     return "#fab387"  # 橙色（2-4分鐘）
+            # else:
+            #     return "#6c7086"  # 灰色（4分鐘以上）
+        except Exception:
+            # 解析失敗，返回預設灰色
+            return "#6c7086"
+
+    def on_focus_clicked(self, widget, event=None):
+        """Focus icon button 被點擊
+
+        Args:
+            widget: 按鈕控件
+            event: 事件對象（button-press-event 時會傳入）
+        """
+        print("=" * 60)
+        print("[DEBUG] on_focus_clicked TRIGGERED!")
+        print(f"[DEBUG] widget: {widget}")
+        print(f"[DEBUG] event: {event}")
+        if event:
+            print(f"[DEBUG] event.type: {event.type}")
+            print(f"[DEBUG] event.button: {event.button}")
+        print("=" * 60)
+
         # 切換到 loading 狀態
         self.set_focus_icon_state("loading")
 
@@ -853,6 +952,10 @@ class NotificationCardV3(Gtk.Box):
 
         thread = threading.Thread(target=focus_thread, daemon=True)
         thread.start()
+
+        # 對於 button-press-event，返回 False 讓事件繼續傳播（給按鈕的 clicked）
+        # 但我們已經不使用 clicked 了，所以這裡返回 True 停止事件傳播
+        return True
 
     def set_focus_icon_state(self, state):
         """設定 focus icon 狀態
@@ -896,8 +999,93 @@ class NotificationCardV3(Gtk.Box):
             self.focus_icon.show()
             self.focus_button.set_sensitive(True)  # 重新啟用按鈕
 
+    def schedule_next_color_update(self):
+        """安排下一次顏色更新
+
+        根據當前經過的時間，決定下一次更新時間：
+
+        DEBUG 模式（1 分鐘單位）：
+        - 0-1 分鐘：1 分鐘後更新
+        - 1-2 分鐘：2 分鐘後更新
+        - 2-4 分鐘：4 分鐘後更新
+        - 4 分鐘以上：不再更新
+
+        正式模式（5 分鐘單位）：
+        - 0-5 分鐘：5 分鐘後更新
+        - 5-10 分鐘：10 分鐘後更新
+        - 10-20 分鐘：20 分鐘後更新
+        - 20 分鐘以上：不再更新
+        """
+        # 取消之前的 timer
+        if self.timer_id:
+            GLib.source_remove(self.timer_id)
+            self.timer_id = None
+
+        if not self.timestamp:
+            return
+
+        try:
+            # 解析通知時間戳
+            notification_time = datetime.datetime.strptime(self.timestamp, "%Y-%m-%d %H:%M:%S")
+            # 計算已經過的時間（分鐘）- 從通知時間開始算
+            elapsed = (datetime.datetime.now() - notification_time).total_seconds() / 60
+        except Exception:
+            return
+
+        # 決定下一次更新的時間點
+        if elapsed < 5:
+            next_update_minutes = 5 - elapsed
+        elif elapsed < 10:
+            next_update_minutes = 10 - elapsed
+        elif elapsed < 20:
+            next_update_minutes = 20 - elapsed
+        else:
+            # 超過 20 分鐘，不再更新
+            return
+
+        # DEBUG 模式（用於快速測試，使用 1 分鐘單位）：
+        # if elapsed < 1:
+        #     next_update_minutes = 1 - elapsed
+        # elif elapsed < 2:
+        #     next_update_minutes = 2 - elapsed
+        # elif elapsed < 4:
+        #     next_update_minutes = 4 - elapsed
+        # else:
+        #     return
+
+        # 設定 timer（轉換為毫秒）
+        timeout_ms = int(next_update_minutes * 60 * 1000)
+        self.timer_id = GLib.timeout_add(timeout_ms, self.update_time_color)
+
+    def update_time_color(self):
+        """更新時間標籤的顏色"""
+        if not self.event_time_label or not self.timestamp:
+            return False  # 停止 timer
+
+        # 獲取新的顏色
+        new_color = self.get_time_color(self.timestamp)
+
+        # 更新標籤
+        if self.timestamp:
+            time_only = self.timestamp.split(" ")[1][:5] if " " in self.timestamp else self.timestamp[:5]
+            event_time_text = f"{self.event_name} at {time_only}"
+        else:
+            event_time_text = self.event_name
+
+        self.event_time_label.set_markup(f'<span size="small" foreground="{new_color}">{event_time_text}</span>')
+
+        # 安排下一次更新
+        self.schedule_next_color_update()
+
+        return False  # 停止當前 timer（因為已經安排了新的）
+
     def on_close(self, widget=None):
         """關閉通知"""
+        # 取消顏色更新 timer
+        if self.timer_id:
+            GLib.source_remove(self.timer_id)
+            self.timer_id = None
+
         if self.on_close_callback:
             self.on_close_callback(self)
 
@@ -1207,7 +1395,8 @@ class NotificationContainer(Gtk.Window):
         self.set_keep_above(True)  # 保持在最上層
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
-        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.set_type_hint(Gdk.WindowTypeHint.UTILITY)  # 使用 UTILITY 類型（可接受點擊）
+        self.set_accept_focus(False)  # 不搶奪焦點
 
         # 視窗大小（從設定讀取）
         self.set_default_size(win_config["width"], win_config["height"])
@@ -1455,6 +1644,14 @@ class NotificationContainer(Gtk.Window):
             os.unlink(self.socket_path)
         Gtk.main_quit()
 
+    def on_window_clicked(self, widget, event):
+        """當窗口被點擊時，確保它獲得焦點
+
+        這樣可以讓窗口在背景時也能響應按鈕點擊
+        """
+        self.present()
+        return False  # 讓事件繼續傳播到子控件（按鈕等）
+
     def on_drag_start(self, widget, event):
         """開始拖拉"""
         if event.button == 1:  # 左鍵
@@ -1645,8 +1842,8 @@ class NotificationContainer(Gtk.Window):
         else:
             project_name = "Claude Code"
 
-        # 時間戳
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 時間戳（優先使用通知中的 timestamp，否則使用當前時間）
+        timestamp = hook_data.get("timestamp", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
         # 根據通知類型設定標題、緊急程度和音效
         # V0/V1/V2 都使用相同的標題邏輯
