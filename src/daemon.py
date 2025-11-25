@@ -19,10 +19,133 @@ import socket
 import threading
 from pathlib import Path
 
+# ===== DEBUG MODE =====
+# 設定為 True 時會記錄詳細的 debug 資訊
+# Local 開發時開啟，上線時設為 False
+DEBUG_MODE = True
+
 SOCKET_PATH = "/tmp/claude-notifier.sock"
 CONFIG_DIR = Path.home() / ".config" / "claude-notify-gtk"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 FOCUS_MAPPING_FILE = CONFIG_DIR / "focus-mapping.json"
+
+# Debug log 目錄
+PROJECT_ROOT = Path(__file__).parent.parent
+DEBUG_LOG_DIR = PROJECT_ROOT / "log"
+DEBUG_LOG_FILE = DEBUG_LOG_DIR / "debug.log"
+
+
+def debug_log(message, data=None):
+    """記錄 debug 資訊到檔案
+
+    Args:
+        message: 日誌訊息
+        data: 要記錄的資料（dict 或其他可序列化的資料）
+    """
+    if not DEBUG_MODE:
+        return
+
+    try:
+        # 確保 log 目錄存在
+        DEBUG_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+        with open(DEBUG_LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"[{timestamp}] {message}\n")
+
+            if data is not None:
+                if isinstance(data, dict):
+                    f.write(json.dumps(data, indent=2, ensure_ascii=False))
+                else:
+                    f.write(str(data))
+                f.write("\n")
+
+            f.write(f"{'='*80}\n")
+
+    except Exception as e:
+        # Debug log 失敗不應該影響主程式運行
+        print(f"Debug log error: {e}", file=sys.stderr)
+
+
+def extract_last_messages_from_transcript(transcript_path, num_messages=3):
+    """從 transcript 文件提取最後幾條訊息
+
+    Args:
+        transcript_path: transcript 文件路徑
+        num_messages: 要提取的訊息數量（預設 3 條）
+
+    Returns:
+        str: 格式化的訊息文字，如果失敗返回 None
+    """
+    try:
+        debug_log("📂 開始讀取 transcript 檔案", {
+            "路徑": transcript_path,
+            "要求訊息數量": num_messages,
+            "檔案存在": os.path.exists(transcript_path) if transcript_path else False
+        })
+
+        if not transcript_path or not os.path.exists(transcript_path):
+            debug_log("❌ Transcript 檔案不存在或路徑為空")
+            return None
+
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Claude Code transcript 格式通常包含 messages 陣列
+        messages = data.get('messages', [])
+        debug_log("📨 Transcript JSON 結構", {
+            "總訊息數": len(messages),
+            "JSON keys": list(data.keys()),
+            "是否有 messages": 'messages' in data
+        })
+
+        if not messages:
+            debug_log("⚠️ Transcript 中沒有 messages 陣列")
+            return None
+
+        # 取最後 num_messages 條訊息
+        last_messages = messages[-num_messages:]
+
+        # 格式化訊息
+        formatted_lines = []
+        for i, msg in enumerate(last_messages):
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+
+            debug_log(f"📝 處理訊息 {i+1}/{len(last_messages)}", {
+                "role": role,
+                "content 類型": type(content).__name__,
+                "content 長度": len(content) if isinstance(content, str) else len(str(content))
+            })
+
+            # 只取文字內容（有些 content 可能是陣列）
+            if isinstance(content, list):
+                text_parts = [item.get('text', '') for item in content if item.get('type') == 'text']
+                content = ' '.join(text_parts)
+
+            # 限制每條訊息的長度
+            if len(content) > 150:
+                content = content[:147] + "..."
+
+            # 使用簡短的角色標記
+            role_icon = "🤖" if role == "assistant" else "👤" if role == "user" else "📝"
+            formatted_lines.append(f"{role_icon} {content}")
+
+        result = '\n'.join(formatted_lines)
+        debug_log("✅ Transcript 內容提取成功", {
+            "提取的訊息數": len(formatted_lines),
+            "總字數": len(result)
+        })
+        return result
+
+    except Exception as e:
+        debug_log("❌ 讀取 transcript 失敗", {
+            "錯誤訊息": str(e),
+            "錯誤類型": type(e).__name__
+        })
+        return None
 
 # 預設設定
 DEFAULT_CONFIG = {
@@ -765,18 +888,101 @@ class NotificationCardV3(Gtk.Box):
         header.pack_start(icon_label, False, False, 0)
         header.pack_start(project_label, True, True, 0)
 
-        # === Body: 訊息主體 ===
-        message_label = Gtk.Label(label=message)
-        message_label.set_line_wrap(True)
-        message_label.set_halign(Gtk.Align.START)
-        message_label.set_valign(Gtk.Align.START)
-        message_label.set_xalign(0)
-        message_label.set_selectable(True)
-        message_label.get_style_context().add_class("notification-body")
-        message_label.set_margin_start(12)
-        message_label.set_margin_end(12)
-        message_label.set_margin_top(4)
-        message_label.set_margin_bottom(6)
+        # === Body: 主要顯示 transcript 對話內容 ===
+        # 優先從 transcript 讀取對話內容
+        transcript_content = None
+        transcript_path = metadata.get("transcript")
+
+        debug_log("📄 Transcript 處理開始", {
+            "提供的 transcript_path": transcript_path,
+            "session_id": metadata.get("session"),
+            "是否需要自動搜尋": not transcript_path and metadata.get("session")
+        })
+
+        # 如果沒有 transcript_path，嘗試從 session_id 推斷
+        if not transcript_path and metadata.get("session"):
+            session_id = metadata.get("session")
+            cwd = metadata.get("cwd", "")
+            project_name = metadata.get("project", "")
+
+            # 嘗試常見的 transcript 路徑模式
+            possible_paths = [
+                # Claude Code 通常把 transcript 存在 ~/.claude/projects/{cwd_hash}/transcripts/{session_id}.jsonl
+                Path.home() / ".claude" / "projects" / cwd / "transcripts" / f"{session_id}.jsonl",
+                Path.home() / ".claude" / "transcripts" / f"{session_id}.jsonl",
+            ]
+
+            debug_log("🔍 開始搜尋 transcript 檔案", {
+                "session_id": session_id,
+                "預設搜尋路徑": [str(p) for p in possible_paths]
+            })
+
+            # 也可以嘗試搜尋 .claude 目錄
+            claude_dir = Path.home() / ".claude"
+            if claude_dir.exists():
+                # 搜尋所有 transcripts 目錄下的 session_id.jsonl
+                for transcript_file in claude_dir.rglob(f"*/{session_id}.jsonl"):
+                    possible_paths.insert(0, transcript_file)
+                    debug_log("✓ 使用 rglob 找到 transcript", {"路徑": str(transcript_file)})
+                    break
+
+            # 檢查每個可能的路徑
+            found_path = None
+            for path in possible_paths:
+                if path.exists():
+                    transcript_path = str(path)
+                    found_path = transcript_path
+                    debug_log("✓ 找到 transcript 檔案", {"路徑": transcript_path})
+                    break
+                else:
+                    debug_log("✗ 路徑不存在", {"路徑": str(path)})
+
+            if not found_path:
+                debug_log("❌ 所有路徑都找不到 transcript 檔案", {
+                    "嘗試過的路徑": [str(p) for p in possible_paths]
+                })
+
+        if transcript_path:
+            transcript_content = extract_last_messages_from_transcript(transcript_path, num_messages=2)
+            debug_log("📖 Transcript 內容提取結果", {
+                "成功": transcript_content is not None,
+                "內容長度": len(transcript_content) if transcript_content else 0
+            })
+        else:
+            debug_log("⚠️ 無 transcript_path，無法讀取對話內容")
+
+        # 主要顯示區域：transcript 內容（優先）
+        if transcript_content:
+            main_message = transcript_content
+        else:
+            main_message = "No message"
+
+        main_label = Gtk.Label(label=main_message)
+        main_label.set_line_wrap(True)
+        main_label.set_halign(Gtk.Align.START)
+        main_label.set_valign(Gtk.Align.START)
+        main_label.set_xalign(0)
+        main_label.set_selectable(True)
+        main_label.get_style_context().add_class("notification-body")
+        main_label.set_margin_start(12)
+        main_label.set_margin_end(12)
+        main_label.set_margin_top(4)
+        main_label.set_margin_bottom(6)
+
+        # === 次要顯示：原本的 message（如果有的話，作為輔助資訊）===
+        message_box = None
+        if message:  # 只有在 message 不為空時才顯示
+            message_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            message_label = Gtk.Label()
+            message_label.set_markup(f'<span size="small" alpha="70%">📝 {message}</span>')
+            message_label.set_line_wrap(True)
+            message_label.set_halign(Gtk.Align.START)
+            message_label.set_xalign(0)
+            message_label.set_selectable(True)
+            message_label.set_margin_start(12)
+            message_label.set_margin_end(12)
+            message_label.set_margin_bottom(4)
+            message_box.pack_start(message_label, False, False, 0)
 
         # === Footer: Session + Transcript（左側）+ Event at Time（右側）===
         footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -784,28 +990,30 @@ class NotificationCardV3(Gtk.Box):
         footer.set_margin_end(12)
         footer.set_margin_bottom(8)
 
-        # 左側：Session + Transcript（垂直排列）
-        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        # 左側：Session Icon（可點擊複製）+ Transcript（水平排列）
+        left_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
-        # Session（有文字標示）
+        # Session ID 複製按鈕（小 icon）
         if metadata.get("session"):
-            session_label = Gtk.Label()
-            session_short = metadata["session"][:8]
-            session_label.set_markup(f'<span size="small" alpha="70%">Session: {session_short}...</span>')
-            session_label.set_halign(Gtk.Align.START)
-            session_label.set_tooltip_text(f'Full Session ID: {metadata["session"]}')
-            left_box.pack_start(session_label, False, False, 0)
+            self.session_id = metadata["session"]  # 保存 session_id
 
-        # Transcript（有文字標示）
-        if metadata.get("transcript"):
-            transcript_label = Gtk.Label()
-            transcript_file = metadata["transcript"].split("/")[-1]
-            if len(transcript_file) > 20:
-                transcript_file = transcript_file[:17] + "..."
-            transcript_label.set_markup(f'<span size="x-small" alpha="70%">Transcript: {transcript_file}</span>')
-            transcript_label.set_halign(Gtk.Align.START)
-            transcript_label.set_tooltip_text(f'Full path: {metadata["transcript"]}')
-            left_box.pack_start(transcript_label, False, False, 0)
+            # 創建按鈕
+            session_button = Gtk.Button()
+            session_button.set_relief(Gtk.ReliefStyle.NONE)  # 無邊框
+            session_button.set_focus_on_click(False)
+
+            # 使用 icon：📋 (clipboard)
+            session_icon = Gtk.Label()
+            session_icon.set_markup('<span size="small">📋</span>')
+            session_button.add(session_icon)
+
+            # 設置 tooltip
+            session_button.set_tooltip_text(f'Click to copy Session ID: {metadata["session"][:16]}...')
+
+            # 連接點擊事件
+            session_button.connect("clicked", self.on_copy_session_id)
+
+            left_box.pack_start(session_button, False, False, 0)
 
         # 右側：Event at Time
         self.event_name = metadata.get("event_name", "")
@@ -831,7 +1039,9 @@ class NotificationCardV3(Gtk.Box):
         # === 左側內容區 ===
         left_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         left_content.pack_start(header, False, False, 0)
-        left_content.pack_start(message_label, False, False, 0)  # 不擴展，保持緊湊
+        left_content.pack_start(main_label, False, False, 0)  # 主要內容（transcript）
+        if message_box:  # 如果有 message，顯示在中間
+            left_content.pack_start(message_box, False, False, 0)
         left_content.pack_start(footer, False, False, 0)
 
         # === 右側 Focus 按鈕區（整個 column 都是按鈕）===
@@ -1078,6 +1288,26 @@ class NotificationCardV3(Gtk.Box):
         self.schedule_next_color_update()
 
         return False  # 停止當前 timer（因為已經安排了新的）
+
+    def on_copy_session_id(self, widget):
+        """複製 SessionID 到剪貼簿"""
+        if not hasattr(self, 'session_id') or not self.session_id:
+            return
+
+        # 使用 GTK clipboard
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(self.session_id, -1)
+        clipboard.store()
+
+        # 顯示複製成功的提示（修改 tooltip）
+        widget.set_tooltip_text(f'✓ Copied: {self.session_id[:16]}...')
+
+        # 3 秒後恢復原本的 tooltip
+        def reset_tooltip():
+            widget.set_tooltip_text(f'Click to copy Session ID: {self.session_id[:16]}...')
+            return False  # 停止 timer
+
+        GLib.timeout_add_seconds(3, reset_tooltip)
 
     def on_close(self, widget=None):
         """關閉通知"""
@@ -1828,6 +2058,9 @@ class NotificationContainer(Gtk.Window):
 
     def handle_notification(self, hook_data):
         """處理通知資料"""
+        # 記錄接收到的原始資料（完整的 JSON）
+        debug_log("🔔 接收到新通知", hook_data)
+
         # 讀取所有可用欄位
         cwd = hook_data.get("cwd", "")
         message = hook_data.get("message", "")  # 不設預設值，保持原樣
@@ -1835,6 +2068,17 @@ class NotificationContainer(Gtk.Window):
         session_id = hook_data.get("session_id", "")
         hook_event_name = hook_data.get("hook_event_name", "")
         transcript_path = hook_data.get("transcript_path", "")
+
+        # 記錄關鍵欄位的解析結果
+        debug_log("📋 解析欄位", {
+            "message": message,
+            "message_length": len(message) if message else 0,
+            "notification_type": notification_type,
+            "session_id": session_id,
+            "hook_event_name": hook_event_name,
+            "transcript_path": transcript_path,
+            "cwd": cwd
+        })
 
         # 專案名稱
         if cwd:
