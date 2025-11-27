@@ -22,8 +22,10 @@ def send_notification(hook_data):
         return True
     except (ConnectionRefusedError, FileNotFoundError):
         # 守護程式未運行
+        import os
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         print("Error: Notification daemon is not running", file=sys.stderr)
-        print("Please start: /home/ubuntu/Workspaces/claude-code-assistant/cc-hooks-for-linux/notification-system/claude-notifier-daemon.py &", file=sys.stderr)
+        print(f"Please start: {script_dir}/src/daemon.py &", file=sys.stderr)
         return False
     except Exception as e:
         print(f"Error sending notification: {e}", file=sys.stderr)

@@ -2447,7 +2447,14 @@ class NotificationContainer(Gtk.Window):
             if hook_event_name:
                 # 根據 event 名稱給不同 icon
                 event_lower = hook_event_name.lower()
-                if "notification" in event_lower:
+                if "permissionrequest" in event_lower:
+                    # PermissionRequest hook event - 權限請求
+                    icon = "🔓"
+                    title_v0 = f"{icon} [{project_name}] Permission Request"
+                    title_v1 = f"{icon} Permission Request"
+                    urgency = "critical"
+                    sound = "dialog-warning"
+                elif "notification" in event_lower:
                     icon = "🔔"
                 elif "start" in event_lower or "begin" in event_lower:
                     icon = "▶️"
@@ -2460,13 +2467,17 @@ class NotificationContainer(Gtk.Window):
                 else:
                     icon = "💬"
 
-                title_v0 = f"{icon} [{project_name}] {hook_event_name}"
-                title_v1 = f"{icon} {hook_event_name}"
+                # 只有非 PermissionRequest 才在這裡設定 title 和預設 urgency/sound
+                if "permissionrequest" not in event_lower:
+                    title_v0 = f"{icon} [{project_name}] {hook_event_name}"
+                    title_v1 = f"{icon} {hook_event_name}"
+                    urgency = "normal"
+                    sound = "message-new-instant"
             else:
                 title_v0 = f"💬 [{project_name}] Notification"
                 title_v1 = "💬 Notification"
-            urgency = "normal"
-            sound = "message-new-instant"
+                urgency = "normal"
+                sound = "message-new-instant"
 
         # 組合訊息內容（V0 版本：Session 放在最前面，如果有的話）
         body_lines = []

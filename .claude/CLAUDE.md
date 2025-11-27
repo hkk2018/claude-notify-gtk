@@ -145,3 +145,12 @@ Before creating a new release:
 - Client is simple and fast, suitable for hook scripts
 - Clear separation of concerns
 - Allows future extensions (multiple clients, different UIs)
+
+## Claude Code Hook 配置
+
+詳細的 Hook 配置說明請參考 [docs/hooks-configuration.md](../docs/hooks-configuration.md)。
+
+**快速參考**：
+- Notification hook 使用空 matcher `"matcher": ""`
+- 只有需要權限的操作才會觸發 Notification hook
+- 初始權限模式選擇不會觸發任何 hook
