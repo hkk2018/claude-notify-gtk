@@ -190,7 +190,8 @@ DEFAULT_CONFIG = {
         "sound_enabled": True,
         "auto_hide_empty": False,
         "max_notifications": 50,
-        "scroll_to_newest": True
+        "scroll_to_newest": True,
+        "shortcut_max_chars": 10
     },
     "notification_content": {
         "show_timestamp": True,
@@ -578,6 +579,215 @@ class FocusManager:
             print(f"Failed to write to log: {e}")
         # 同時輸出到 stderr
         print(f"FocusManager Error: {message}", file=sys.stderr)
+
+    def scan_open_ide_windows(self):
+        """掃描目前開著的 IDE 視窗
+
+        Returns:
+            list: 開著的 IDE 視窗列表，每個元素是字典：
+                  {"window_id": str, "project_name": str, "editor_type": str, "window_title": str}
+        """
+        results = []
+        builtin_editors = self.mapping.get("builtin_editors", {})
+
+        # 確保使用正確的 DISPLAY 環境變數
+        env = os.environ.copy()
+        if not env.get("DISPLAY"):
+            env["DISPLAY"] = ":1"
+
+        for editor_type, editor_config in builtin_editors.items():
+            window_class = editor_config.get("window_class")
+            window_title_pattern = editor_config.get("window_title")
+
+            if not window_class and not window_title_pattern:
+                continue
+
+            try:
+                # 使用 xdotool 搜尋視窗
+                if window_class:
+                    search_cmd = ["xdotool", "search", "--class", window_class]
+                else:
+                    search_cmd = ["xdotool", "search", "--name", window_title_pattern]
+
+                search_result = subprocess.run(
+                    search_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    env=env
+                )
+
+                if search_result.returncode != 0:
+                    continue
+
+                window_ids = search_result.stdout.strip().split('\n')
+                if not window_ids or window_ids[0] == '':
+                    continue
+
+                # 取得每個視窗的名稱
+                for wid in window_ids:
+                    try:
+                        name_result = subprocess.run(
+                            ["xdotool", "getwindowname", wid],
+                            capture_output=True,
+                            text=True,
+                            timeout=1,
+                            env=env
+                        )
+                        window_name = name_result.stdout.strip()
+                        window_name_lower = window_name.lower()
+
+                        # 跳過只有 class 名稱的視窗（例如 "cursor", "code" 等輔助視窗）
+                        if window_class and window_name_lower == window_class.lower():
+                            continue
+                        if window_name_lower == editor_type.lower():
+                            continue
+
+                        # 確認視窗標題符合 IDE 格式（結尾包含 IDE 名稱）
+                        # 過濾掉非 IDE 視窗（如 Chrome for Testing 等）
+                        ide_suffixes = ["cursor", "visual studio code", "code"]
+                        is_ide_window = False
+                        for suffix in ide_suffixes:
+                            if window_name_lower.endswith(f" - {suffix}"):
+                                is_ide_window = True
+                                break
+                        if not is_ide_window:
+                            continue
+
+                        # 從視窗標題提取專案名稱
+                        project_name = self._extract_project_name(window_name, editor_type)
+
+                        # 避免重複（同一個專案只顯示一次）
+                        if not any(r["project_name"] == project_name and r["editor_type"] == editor_type for r in results):
+                            results.append({
+                                "window_id": wid,
+                                "project_name": project_name,
+                                "editor_type": editor_type,
+                                "window_title": window_name
+                            })
+                    except Exception:
+                        continue
+
+            except subprocess.TimeoutExpired:
+                continue
+            except FileNotFoundError:
+                print("xdotool not found. Please install: sudo apt install xdotool")
+                break
+
+        return results
+
+    def _extract_project_name(self, window_title, editor_type):
+        """從視窗標題提取專案名稱
+
+        Cursor 格式: "<活動內容> - <專案名稱> - Cursor"
+        VSCode 格式: "<檔案名稱> - <專案名稱> - Visual Studio Code"
+
+        Args:
+            window_title: 視窗標題
+            editor_type: 編輯器類型（vscode, cursor 等）
+
+        Returns:
+            str: 專案名稱
+        """
+        # 使用 " - " 分割
+        parts = window_title.split(" - ")
+
+        if len(parts) >= 3:
+            # 格式：<活動內容> - <專案名稱> - <IDE名稱>
+            # 取倒數第二段作為專案名稱
+            last_part = parts[-1].strip()
+            # 確認最後一段是 IDE 名稱
+            if last_part.lower() in ["cursor", "visual studio code", "code"]:
+                return parts[-2].strip()
+
+        if len(parts) >= 2:
+            # 格式：<專案名稱> - <IDE名稱>
+            last_part = parts[-1].strip()
+            if last_part.lower() in ["cursor", "visual studio code", "code"]:
+                return parts[-2].strip()
+            # 格式：<活動內容> - <專案名稱>
+            return parts[-1].strip()
+
+        # 如果沒有找到分隔符號，返回整個標題（截斷）
+        return window_title[:30] if len(window_title) > 30 else window_title
+
+    def focus_window_by_id(self, window_id):
+        """透過視窗 ID 直接 focus 視窗
+
+        Args:
+            window_id: X11 視窗 ID
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            env = os.environ.copy()
+            if not env.get("DISPLAY"):
+                env["DISPLAY"] = ":1"
+
+            from Xlib import X, display
+            from Xlib.protocol import event
+            import time
+
+            d = display.Display(env.get("DISPLAY", ":1"))
+            root = d.screen().root
+            target_window = d.create_resource_object('window', int(window_id))
+            active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
+
+            # Step 1: WM_CHANGE_STATE (取消最小化)
+            wm_state = d.intern_atom("WM_CHANGE_STATE")
+            ev = event.ClientMessage(
+                window=target_window,
+                client_type=wm_state,
+                data=(32, [1, 0, 0, 0, 0])
+            )
+            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            d.flush()
+            time.sleep(0.05)
+
+            # Step 2: _NET_ACTIVE_WINDOW ClientMessage
+            current_time = int(time.time() * 1000) & 0xFFFFFFFF
+            ev = event.ClientMessage(
+                window=target_window,
+                client_type=active_window_atom,
+                data=(32, [2, current_time, 0, 0, 0])
+            )
+            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            d.flush()
+            time.sleep(0.05)
+
+            # Step 3: raise 視窗
+            target_window.configure(stack_mode=X.Above)
+            d.flush()
+            time.sleep(0.05)
+
+            # Step 4: 設定 keyboard focus
+            target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+            d.flush()
+            d.sync()
+            time.sleep(0.05)
+
+            # 雙重 Focus（Electron 應用需要）
+            current_time = int(time.time() * 1000) & 0xFFFFFFFF
+            ev = event.ClientMessage(
+                window=target_window,
+                client_type=active_window_atom,
+                data=(32, [2, current_time, 0, 0, 0])
+            )
+            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            target_window.configure(stack_mode=X.Above)
+            target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+            d.flush()
+            d.sync()
+
+            return True
+
+        except ImportError:
+            self.log_error("python3-xlib not installed")
+            return False
+        except Exception as e:
+            self.log_error(f"focus_window_by_id failed: {e}")
+            return False
 
 
 class NotificationCard(Gtk.Box):
@@ -1578,6 +1788,18 @@ class SettingsDialog(Gtk.Dialog):
         self.max_notif_spin = max_notif_spin
         row += 1
 
+        # 快捷按鈕顯示字數
+        label = Gtk.Label(label="Shortcut Max Chars:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        shortcut_chars_spin = Gtk.SpinButton()
+        shortcut_chars_spin.set_range(4, 20)
+        shortcut_chars_spin.set_increments(1, 2)
+        shortcut_chars_spin.set_value(self.config["behavior"].get("shortcut_max_chars", 10))
+        grid.attach(shortcut_chars_spin, 1, row, 1, 1)
+        self.shortcut_chars_spin = shortcut_chars_spin
+        row += 1
+
         return grid
 
     def get_updated_config(self):
@@ -1597,6 +1819,7 @@ class SettingsDialog(Gtk.Dialog):
         # 更新行為設定
         config["behavior"]["sound_enabled"] = self.sound_switch.get_active()
         config["behavior"]["max_notifications"] = int(self.max_notif_spin.get_value())
+        config["behavior"]["shortcut_max_chars"] = int(self.shortcut_chars_spin.get_value())
 
         return config
 
@@ -1612,6 +1835,15 @@ class SettingsDialog(Gtk.Dialog):
         # 視窗大小
         self.width_spin.connect("value-changed", self.on_preview_change)
         self.height_spin.connect("value-changed", self.on_preview_change)
+        # 快捷按鈕字數
+        self.shortcut_chars_spin.connect("value-changed", self.on_shortcut_chars_change)
+
+    def on_shortcut_chars_change(self, widget):
+        """當快捷按鈕字數改變時，即時更新快捷列"""
+        max_chars = int(self.shortcut_chars_spin.get_value())
+        self.parent.config["behavior"]["shortcut_max_chars"] = max_chars
+        # 重新載入快捷列
+        self.parent.refresh_shortcut_bar()
 
     def on_preview_change(self, widget):
         """當設定改變時，即時預覽效果"""
@@ -1665,6 +1897,7 @@ class SettingsDialog(Gtk.Dialog):
         self.height_spin.set_value(DEFAULT_CONFIG["window"]["height"])
         self.sound_switch.set_active(DEFAULT_CONFIG["behavior"]["sound_enabled"])
         self.max_notif_spin.set_value(DEFAULT_CONFIG["behavior"]["max_notifications"])
+        self.shortcut_chars_spin.set_value(DEFAULT_CONFIG["behavior"]["shortcut_max_chars"])
 
         # 控件的 value-changed 信號會自動觸發 on_preview_change，所以不需要手動調用
 
@@ -1814,6 +2047,9 @@ class NotificationContainer(Gtk.Window):
         # 將 header 加入 EventBox
         header_event_box.add(header)
 
+        # IDE 快捷列
+        self.shortcut_bar = self.create_shortcut_bar()
+
         # 滾動視窗
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -1835,10 +2071,104 @@ class NotificationContainer(Gtk.Window):
 
         # 組裝
         main_box.pack_start(header_event_box, False, False, 0)
+        main_box.pack_start(self.shortcut_bar, False, False, 0)
         main_box.pack_start(Gtk.Separator(), False, False, 0)
         main_box.pack_start(scrolled, True, True, 0)
 
         self.add(main_box)
+
+    def create_shortcut_bar(self):
+        """建立 IDE 快捷列"""
+        # 外層容器（包含 margin）
+        shortcut_container = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        shortcut_container.set_margin_start(20)
+        shortcut_container.set_margin_end(20)
+        shortcut_container.set_margin_top(10)
+        shortcut_container.set_margin_bottom(0)
+        shortcut_container.get_style_context().add_class("shortcut-bar")
+
+        # 快捷按鈕容器（可滾動）
+        self.shortcut_buttons_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.shortcut_buttons_box.set_hexpand(True)
+
+        # 使用 ScrolledWindow 來處理按鈕過多的情況
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        scrolled.set_hexpand(True)
+        scrolled.set_min_content_height(28)
+        scrolled.add(self.shortcut_buttons_box)
+
+        # Refresh 按鈕
+        refresh_button = Gtk.Button()
+        refresh_button.set_relief(Gtk.ReliefStyle.NONE)
+        refresh_button.set_tooltip_text("Refresh IDE windows")
+        refresh_icon = Gtk.Image.new_from_icon_name("view-refresh", Gtk.IconSize.SMALL_TOOLBAR)
+        refresh_button.add(refresh_icon)
+        refresh_button.connect("clicked", self.on_refresh_shortcut_bar)
+        refresh_button.get_style_context().add_class("shortcut-refresh")
+
+        shortcut_container.pack_start(scrolled, True, True, 0)
+        shortcut_container.pack_end(refresh_button, False, False, 0)
+
+        # 初始載入 IDE 視窗
+        GLib.idle_add(self.refresh_shortcut_bar)
+
+        return shortcut_container
+
+    def refresh_shortcut_bar(self):
+        """重新載入 IDE 視窗快捷按鈕"""
+        # 清除現有按鈕
+        for child in self.shortcut_buttons_box.get_children():
+            self.shortcut_buttons_box.remove(child)
+
+        # 掃描開著的 IDE 視窗
+        ide_windows = self.focus_manager.scan_open_ide_windows()
+
+        if not ide_windows:
+            # 沒有開著的 IDE 視窗，顯示提示
+            empty_label = Gtk.Label(label="No IDE windows")
+            empty_label.get_style_context().add_class("shortcut-empty")
+            self.shortcut_buttons_box.pack_start(empty_label, False, False, 0)
+        else:
+            # 從設定讀取按鈕顯示字數限制
+            max_chars = self.config["behavior"].get("shortcut_max_chars", 10)
+
+            # 建立按鈕
+            for window_info in ide_windows:
+                project_name = window_info["project_name"]
+                editor_type = window_info["editor_type"]
+                window_id = window_info["window_id"]
+
+                # 截取專案名稱
+                display_name = project_name[:max_chars] if len(project_name) > max_chars else project_name
+
+                # 根據 IDE 類型設定顏色 class
+                button = Gtk.Button(label=display_name)
+                button.set_relief(Gtk.ReliefStyle.NONE)
+                button.set_tooltip_text(f"{project_name} ({editor_type.upper()})")
+                button.get_style_context().add_class("shortcut-button")
+                button.get_style_context().add_class(f"shortcut-{editor_type}")
+
+                # 連接點擊事件
+                button.connect("clicked", self.on_shortcut_button_clicked, window_id)
+
+                self.shortcut_buttons_box.pack_start(button, False, False, 0)
+
+        self.shortcut_buttons_box.show_all()
+        return False  # GLib.idle_add 只執行一次
+
+    def on_refresh_shortcut_bar(self, button):
+        """Refresh 按鈕點擊事件"""
+        self.refresh_shortcut_bar()
+
+    def on_shortcut_button_clicked(self, button, window_id):
+        """快捷按鈕點擊事件"""
+        # 在背景執行 focus 操作
+        def focus_thread():
+            self.focus_manager.focus_window_by_id(window_id)
+
+        thread = threading.Thread(target=focus_thread, daemon=True)
+        thread.start()
 
     def position_window(self):
         """定位視窗到右下角"""
@@ -1944,6 +2274,55 @@ class NotificationContainer(Gtk.Window):
 
         .focus-button:active {{
             background-color: rgba(137, 180, 250, 0.35);
+        }}
+
+        /* IDE 快捷列 */
+        .shortcut-bar {{
+            padding: 2px 4px;
+        }}
+
+        .shortcut-button {{
+            font-size: 11px;
+            padding: 2px 8px;
+            min-height: 20px;
+            border-radius: 4px;
+            background-color: rgba(137, 180, 250, 0.15);
+            color: #cdd6f4;
+        }}
+
+        .shortcut-button:hover {{
+            background-color: rgba(137, 180, 250, 0.3);
+        }}
+
+        .shortcut-button:active {{
+            background-color: rgba(137, 180, 250, 0.45);
+        }}
+
+        /* VSCode - 藍色 */
+        .shortcut-vscode {{
+            border-left: 3px solid #89b4fa;
+        }}
+
+        /* Cursor - 紫色 */
+        .shortcut-cursor {{
+            border-left: 3px solid #cba6f7;
+        }}
+
+        .shortcut-refresh {{
+            padding: 2px 4px;
+            min-width: 24px;
+            min-height: 24px;
+        }}
+
+        .shortcut-refresh:hover {{
+            background-color: rgba(137, 180, 250, 0.2);
+            border-radius: 4px;
+        }}
+
+        .shortcut-empty {{
+            font-size: 11px;
+            color: rgba(205, 214, 244, 0.5);
+            font-style: italic;
         }}
         """.encode('utf-8')
 
