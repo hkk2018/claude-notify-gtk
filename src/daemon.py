@@ -2373,10 +2373,39 @@ class NotificationContainer(Gtk.Window):
         })
 
         # 專案名稱
-        if cwd:
-            project_name = cwd.split("/")[-1]
-        else:
-            project_name = "Claude Code"
+        # 從 cwd 向上查找，找到編碼後與 transcript_path 中的專案路徑相同的目錄
+        # transcript_path 格式: ~/.claude/projects/-home-ubuntu-Projects-ken-onexas/xxx.jsonl
+        # 編碼規則：把 / 換成 -，去掉開頭 /（如 /home/ubuntu → -home-ubuntu）
+        project_name = None
+        if transcript_path and cwd:
+            try:
+                # 從 transcript_path 提取編碼後的專案路徑
+                parts = transcript_path.split("/")
+                encoded_path = None
+                for i, part in enumerate(parts):
+                    if part == "projects" and i + 1 < len(parts):
+                        encoded_path = parts[i + 1]  # 如 -home-ubuntu-Projects-ken-onexas
+                        break
+
+                if encoded_path and encoded_path.startswith("-"):
+                    # 從 cwd 向上遍歷父目錄，找到編碼後與 encoded_path 相同的目錄
+                    current = Path(cwd)
+                    while current != current.parent:  # 直到根目錄
+                        # 把當前路徑編碼：去掉開頭 /，把 / 換成 -，加上開頭 -
+                        current_encoded = "-" + str(current)[1:].replace("/", "-")
+                        if current_encoded == encoded_path:
+                            project_name = current.name
+                            break
+                        current = current.parent
+            except Exception as e:
+                debug_log("⚠️ 從 transcript_path 推斷專案名稱失敗", {"error": str(e)})
+
+        # Fallback 到 cwd
+        if not project_name:
+            if cwd:
+                project_name = cwd.split("/")[-1]
+            else:
+                project_name = "Claude Code"
 
         # 時間戳（優先使用通知中的 timestamp，否則使用當前時間）
         timestamp = hook_data.get("timestamp", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
