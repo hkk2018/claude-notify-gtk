@@ -904,19 +904,18 @@ class NotificationCardV3(Gtk.Box):
         project_label.set_max_width_chars(30)  # 限制最大寬度
         project_label.get_style_context().add_class("notification-title")
 
-        # Detail menu button (⋮)
-        detail_button = Gtk.Button()
-        detail_button.set_label("⋮")
-        detail_button.set_relief(Gtk.ReliefStyle.NONE)
-        detail_button.set_focus_on_click(False)
-        detail_button.set_tooltip_text("Show notification details")
-        detail_button.connect("clicked", self.on_show_detail)
-        # 限制按鈕大小，避免點擊範圍過大
-        detail_button.set_size_request(20, 20)  # 固定 20x20px
+        # Menu button (⋮)
+        menu_button = Gtk.Button()
+        menu_button.set_label("⋮")
+        menu_button.set_relief(Gtk.ReliefStyle.NONE)
+        menu_button.set_focus_on_click(False)
+        menu_button.set_tooltip_text("More options")
+        menu_button.connect("clicked", self.on_show_menu)
+        menu_button.set_size_request(20, 20)
 
         header.pack_start(icon_label, False, False, 0)
         header.pack_start(project_label, True, True, 0)
-        header.pack_start(detail_button, False, False, 0)
+        header.pack_start(menu_button, False, False, 0)
 
         # === Body: 主要顯示 transcript 對話內容 ===
         # 優先從 transcript 讀取對話內容
@@ -1309,6 +1308,15 @@ class NotificationCardV3(Gtk.Box):
 
         return False  # 停止當前 timer（因為已經安排了新的）
 
+    def on_show_menu(self, widget):
+        """顯示選項選單"""
+        menu = Gtk.Menu()
+        detail_item = Gtk.MenuItem(label="詳情")
+        detail_item.connect("activate", self.on_show_detail)
+        menu.append(detail_item)
+        menu.show_all()
+        menu.popup_at_widget(widget, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
+
     def on_show_detail(self, widget):
         """顯示通知詳細資訊對話框"""
         if not self.notification_data:
@@ -1681,6 +1689,17 @@ class NotificationContainer(Gtk.Window):
         self.drag_start_y = 0
         self.is_dragging = False
 
+        # 調整大小相關變數
+        self.resize_edge = None
+        self.is_resizing = False
+        self.resize_start_x = 0
+        self.resize_start_y = 0
+        self.resize_start_width = 0
+        self.resize_start_height = 0
+        self.resize_start_win_x = 0
+        self.resize_start_win_y = 0
+        self.edge_size = 10
+
         self.setup_window()
         self.create_ui()
         self.position_window()
@@ -1718,43 +1737,70 @@ class NotificationContainer(Gtk.Window):
         if visual:
             self.set_visual(visual)
 
+        # 視窗事件（邊緣調整大小）
+        self.add_events(Gdk.EventMask.POINTER_MOTION_MASK |
+                        Gdk.EventMask.BUTTON_PRESS_MASK |
+                        Gdk.EventMask.BUTTON_RELEASE_MASK)
+        self.connect("motion-notify-event", self.on_window_motion)
+        self.connect("button-press-event", self.on_window_button_press)
+        self.connect("button-release-event", self.on_window_button_release)
+
     def create_ui(self):
         """建立 UI"""
-        # 主容器
+        # 主容器 - 不設 margin，讓子元件各自控制
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         # 標題列（用 EventBox 包裝以支援拖拉）
+        # 背景色放在 EventBox 上，用 CSS padding 控制內容距離
         header_event_box = Gtk.EventBox()
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header_event_box.get_style_context().add_class("header")
+        # 設定 margin 讓標題列跟卡片對齊
+        header_event_box.set_margin_start(20)
+        header_event_box.set_margin_end(20)
+        header_event_box.set_margin_top(12)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # 內部 margin = EventBox 的 padding 效果
         header.set_margin_start(12)
         header.set_margin_end(12)
         header.set_margin_top(8)
         header.set_margin_bottom(8)
-        header.get_style_context().add_class("header")
 
         # 設定拖拉事件
         header_event_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
                                     Gdk.EventMask.BUTTON_RELEASE_MASK |
-                                    Gdk.EventMask.POINTER_MOTION_MASK)
+                                    Gdk.EventMask.POINTER_MOTION_MASK |
+                                    Gdk.EventMask.ENTER_NOTIFY_MASK |
+                                    Gdk.EventMask.LEAVE_NOTIFY_MASK)
         header_event_box.connect("button-press-event", self.on_drag_start)
         header_event_box.connect("button-release-event", self.on_drag_end)
         header_event_box.connect("motion-notify-event", self.on_drag_motion)
+        header_event_box.connect("enter-notify-event", self.on_header_enter)
+        header_event_box.connect("leave-notify-event", self.on_header_leave)
 
         title_label = Gtk.Label(label="Claude Code Notifications")
         title_label.set_halign(Gtk.Align.START)
         title_label.set_hexpand(True)
         title_label.get_style_context().add_class("header-title")
 
-        # 設定按鈕
-        settings_button = Gtk.Button.new_from_icon_name("preferences-system", Gtk.IconSize.BUTTON)
-        settings_button.set_relief(Gtk.ReliefStyle.NONE)
-        settings_button.set_tooltip_text("Settings")
-        settings_button.connect("clicked", self.open_settings_dialog)
+        # 設定選單按鈕（齒輪圖示）
+        settings_menu_button = Gtk.MenuButton()
+        settings_menu_button.set_relief(Gtk.ReliefStyle.NONE)
+        settings_menu_button.set_tooltip_text("Settings")
+        settings_icon = Gtk.Image.new_from_icon_name("preferences-system", Gtk.IconSize.BUTTON)
+        settings_menu_button.add(settings_icon)
 
-        # 清除全部按鈕
-        clear_button = Gtk.Button(label="Clear All")
-        clear_button.connect("clicked", self.clear_all)
-        clear_button.get_style_context().add_class("clear-button")
+        # 建立設定選單
+        settings_menu = Gtk.Menu()
+        # 設定選項
+        settings_item = Gtk.MenuItem(label="Settings")
+        settings_item.connect("activate", lambda w: self.open_settings_dialog(w))
+        settings_menu.append(settings_item)
+        # Clear All 選項
+        clear_item = Gtk.MenuItem(label="Clear All")
+        clear_item.connect("activate", lambda w: self.clear_all(w))
+        settings_menu.append(clear_item)
+        settings_menu.show_all()
+        settings_menu_button.set_popup(settings_menu)
 
         # 最小化按鈕
         minimize_button = Gtk.Button.new_from_icon_name("window-minimize", Gtk.IconSize.BUTTON)
@@ -1762,8 +1808,7 @@ class NotificationContainer(Gtk.Window):
         minimize_button.connect("clicked", lambda w: self.hide())
 
         header.pack_start(title_label, True, True, 0)
-        header.pack_start(settings_button, False, False, 0)
-        header.pack_start(clear_button, False, False, 0)
+        header.pack_start(settings_menu_button, False, False, 0)
         header.pack_start(minimize_button, False, False, 0)
 
         # 將 header 加入 EventBox
@@ -1774,11 +1819,15 @@ class NotificationContainer(Gtk.Window):
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scrolled.set_hexpand(True)
         scrolled.set_vexpand(True)
+        # 設定 margin 讓 resize 邊界可以被偵測（edge_size = 10px）
+        scrolled.set_margin_start(10)
+        scrolled.set_margin_end(10)
+        scrolled.set_margin_bottom(10)
 
-        # 通知列表容器
+        # 通知列表容器（scrolled 已有外部 margin，這裡只需要內部間距）
         self.notification_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.notification_box.set_margin_start(4)
-        self.notification_box.set_margin_end(4)
+        self.notification_box.set_margin_start(2)
+        self.notification_box.set_margin_end(2)
         self.notification_box.set_margin_top(4)
         self.notification_box.set_margin_bottom(4)
 
@@ -1819,8 +1868,15 @@ class NotificationContainer(Gtk.Window):
             opacity: {app_config["opacity"]};
         }}
 
+        /* Dialog 視窗不要套用透明度和動畫 */
+        dialog {{
+            opacity: 1;
+            transition: none;
+        }}
+
         .header {{
             background-color: rgba(17, 17, 27, 0.8);
+            padding: 12px 12px 8px 12px;
         }}
 
         .header:hover {{
@@ -1906,7 +1962,7 @@ class NotificationContainer(Gtk.Window):
         """創建系統托盤圖標"""
         # 使用 StatusIcon (GTK3)
         self.status_icon = Gtk.StatusIcon()
-        self.status_icon.set_from_icon_name("notification-message-im")
+        self.status_icon.set_from_icon_name("preferences-system-notifications-symbolic")
         self.status_icon.set_tooltip_text("Claude Code Notifier")
         self.status_icon.set_visible(True)
 
@@ -1926,21 +1982,31 @@ class NotificationContainer(Gtk.Window):
         """托盤圖標右鍵選單"""
         menu = Gtk.Menu()
 
-        # Show/Hide 選項
-        show_item = Gtk.MenuItem(label="Show/Hide Window")
-        show_item.connect("activate", lambda x: self.on_tray_activate(status_icon))
+        # Show Window 選項
+        show_item = Gtk.MenuItem(label="顯示視窗 (Show)")
+        show_item.connect("activate", lambda x: self.show_window())
         menu.append(show_item)
+
+        # Hide Window 選項
+        hide_item = Gtk.MenuItem(label="隱藏視窗 (Hide)")
+        hide_item.connect("activate", lambda x: self.hide())
+        menu.append(hide_item)
 
         # 分隔線
         menu.append(Gtk.SeparatorMenuItem())
 
-        # Quit 選項
-        quit_item = Gtk.MenuItem(label="Quit")
+        # Quit Daemon 選項 - 明確標示會停止背景服務
+        quit_item = Gtk.MenuItem(label="結束服務 (Quit Daemon)")
         quit_item.connect("activate", self.on_quit)
         menu.append(quit_item)
 
         menu.show_all()
         menu.popup(None, None, None, None, button, activate_time)
+
+    def show_window(self):
+        """顯示視窗"""
+        self.show_all()
+        self.present()
 
     def on_quit(self, widget):
         """退出程式"""
@@ -1957,9 +2023,39 @@ class NotificationContainer(Gtk.Window):
         self.present()
         return False  # 讓事件繼續傳播到子控件（按鈕等）
 
+    def on_header_enter(self, widget, event):
+        """滑鼠進入 header - 顯示拖拽游標"""
+        win_x, win_y = self.get_position()
+        window_rel_x = event.x_root - win_x
+        window_rel_y = event.y_root - win_y
+        if self.config["window"]["resizable"]:
+            edge = self.get_edge_at_position(window_rel_x, window_rel_y)
+            if edge:
+                return False
+        gdk_window = widget.get_window()
+        if gdk_window:
+            cursor = Gdk.Cursor.new_for_display(Gdk.Display.get_default(), Gdk.CursorType.FLEUR)
+            gdk_window.set_cursor(cursor)
+        return False
+
+    def on_header_leave(self, widget, event):
+        """滑鼠離開 header - 恢復游標"""
+        gdk_window = widget.get_window()
+        if gdk_window:
+            gdk_window.set_cursor(None)
+        return False
+
     def on_drag_start(self, widget, event):
         """開始拖拉"""
         if event.button == 1:  # 左鍵
+            # 檢查是否在邊緣區域（調整大小優先）
+            win_x, win_y = self.get_position()
+            window_rel_x = event.x_root - win_x
+            window_rel_y = event.y_root - win_y
+            if self.config["window"]["resizable"]:
+                edge = self.get_edge_at_position(window_rel_x, window_rel_y)
+                if edge:
+                    return False  # 讓 resize 處理
             self.is_dragging = True
             self.drag_start_x = event.x_root
             self.drag_start_y = event.y_root
@@ -1992,6 +2088,124 @@ class NotificationContainer(Gtk.Window):
 
             return True
         return False
+
+    def get_edge_at_position(self, x, y):
+        """檢測滑鼠位置是否在視窗邊緣"""
+        width, height = self.get_size()
+        edge = self.edge_size
+        at_left = x <= edge
+        at_right = x >= width - edge
+        at_top = y <= edge
+        at_bottom = y >= height - edge
+
+        if at_top and at_left: return 'nw'
+        if at_top and at_right: return 'ne'
+        if at_bottom and at_left: return 'sw'
+        if at_bottom and at_right: return 'se'
+        if at_top: return 'n'
+        if at_bottom: return 's'
+        if at_left: return 'w'
+        if at_right: return 'e'
+        return None
+
+    def get_cursor_for_edge(self, edge):
+        """根據邊緣位置返回游標類型"""
+        cursor_map = {
+            'n': Gdk.CursorType.TOP_SIDE,
+            's': Gdk.CursorType.BOTTOM_SIDE,
+            'e': Gdk.CursorType.RIGHT_SIDE,
+            'w': Gdk.CursorType.LEFT_SIDE,
+            'ne': Gdk.CursorType.TOP_RIGHT_CORNER,
+            'nw': Gdk.CursorType.TOP_LEFT_CORNER,
+            'se': Gdk.CursorType.BOTTOM_RIGHT_CORNER,
+            'sw': Gdk.CursorType.BOTTOM_LEFT_CORNER,
+        }
+        return cursor_map.get(edge)
+
+    def on_window_motion(self, widget, event):
+        """視窗滑鼠移動 - 游標變化和調整大小"""
+        if not self.config["window"]["resizable"]:
+            return False
+
+        if self.is_resizing:
+            if not (event.state & Gdk.ModifierType.BUTTON1_MASK):
+                self.is_resizing = False
+                self.resize_edge = None
+                gdk_window = self.get_window()
+                if gdk_window:
+                    gdk_window.set_cursor(None)
+                return False
+            self.do_resize(event)
+            return True
+
+        edge = self.get_edge_at_position(event.x, event.y)
+        gdk_window = self.get_window()
+        if gdk_window:
+            if edge:
+                cursor_type = self.get_cursor_for_edge(edge)
+                cursor = Gdk.Cursor.new_for_display(Gdk.Display.get_default(), cursor_type)
+                gdk_window.set_cursor(cursor)
+            else:
+                gdk_window.set_cursor(None)
+        return False
+
+    def on_window_button_press(self, widget, event):
+        """視窗滑鼠按下 - 開始調整大小"""
+        if event.button != 1 or not self.config["window"]["resizable"]:
+            return False
+        edge = self.get_edge_at_position(event.x, event.y)
+        if edge:
+            self.is_resizing = True
+            self.resize_edge = edge
+            self.resize_start_x = event.x_root
+            self.resize_start_y = event.y_root
+            self.resize_start_width, self.resize_start_height = self.get_size()
+            self.resize_start_win_x, self.resize_start_win_y = self.get_position()
+            return True
+        return False
+
+    def on_window_button_release(self, widget, event):
+        """視窗滑鼠釋放 - 結束調整大小"""
+        if event.button == 1 and self.is_resizing:
+            self.is_resizing = False
+            self.resize_edge = None
+            gdk_window = self.get_window()
+            if gdk_window:
+                gdk_window.set_cursor(None)
+            return True
+        return False
+
+    def do_resize(self, event):
+        """執行調整大小"""
+        if not self.resize_edge:
+            return
+        delta_x = event.x_root - self.resize_start_x
+        delta_y = event.y_root - self.resize_start_y
+        min_width = self.config["window"]["min_width"]
+        min_height = self.config["window"]["min_height"]
+        new_width = self.resize_start_width
+        new_height = self.resize_start_height
+        new_x = self.resize_start_win_x
+        new_y = self.resize_start_win_y
+        edge = self.resize_edge
+
+        if 'e' in edge:
+            new_width = max(min_width, self.resize_start_width + delta_x)
+        if 'w' in edge:
+            proposed = self.resize_start_width - delta_x
+            if proposed >= min_width:
+                new_width = proposed
+                new_x = self.resize_start_win_x + delta_x
+        if 's' in edge:
+            new_height = max(min_height, self.resize_start_height + delta_y)
+        if 'n' in edge:
+            proposed = self.resize_start_height - delta_y
+            if proposed >= min_height:
+                new_height = proposed
+                new_y = self.resize_start_win_y + delta_y
+
+        self.resize(int(new_width), int(new_height))
+        self.move(int(new_x), int(new_y))
 
     def toggle_opacity(self, widget):
         """切換透明度（已棄用，改用設定對話框）"""
@@ -2036,11 +2250,14 @@ class NotificationContainer(Gtk.Window):
                 )
                 error_dialog.format_secondary_text(str(e))
                 error_dialog.run()
+                error_dialog.hide()
                 error_dialog.destroy()
         else:
             # 取消時恢復原始設定
             dialog.restore_original_settings()
 
+        # 先隱藏再銷毀，避免合成器的淡出動畫
+        dialog.hide()
         dialog.destroy()
 
     def add_notification(self, title, message, urgency="normal", sound=None, metadata=None, card_version=3, notification_data=None):
