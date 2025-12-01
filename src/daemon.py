@@ -2705,27 +2705,75 @@ class NotificationContainer(Gtk.Window):
 
     def start_socket_server(self):
         """啟動 Unix socket 伺服器接收通知"""
+        self.socket_server = None
+        self.socket_healthy = True
+
         def server_thread():
             # 移除舊的 socket
             if os.path.exists(SOCKET_PATH):
                 os.remove(SOCKET_PATH)
 
-            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            server.bind(SOCKET_PATH)
-            server.listen(5)
+            self.socket_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.socket_server.bind(SOCKET_PATH)
+            self.socket_server.listen(5)
 
             while True:
-                conn, _ = server.accept()
                 try:
-                    data = conn.recv(4096).decode('utf-8')
-                    if data:
-                        notification_data = json.loads(data)
-                        GLib.idle_add(self.handle_notification, notification_data)
-                finally:
-                    conn.close()
+                    conn, _ = self.socket_server.accept()
+                    try:
+                        data = conn.recv(4096).decode('utf-8')
+                        if data:
+                            notification_data = json.loads(data)
+                            GLib.idle_add(self.handle_notification, notification_data)
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    debug_log("❌ Socket server error", {"error": str(e)})
+                    self.socket_healthy = False
+                    break
 
         thread = threading.Thread(target=server_thread, daemon=True)
         thread.start()
+
+        # 啟動 health check watchdog
+        GLib.timeout_add_seconds(30, self.check_socket_health)
+
+    def check_socket_health(self):
+        """定期檢查 socket 是否健康，異常時自動重啟"""
+        try:
+            # 嘗試連線測試
+            test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            test_sock.settimeout(2)
+            test_sock.connect(SOCKET_PATH)
+            test_sock.close()
+            debug_log("✅ Socket health check passed")
+            return True  # 繼續定時檢查
+        except Exception as e:
+            debug_log("⚠️ Socket health check failed, restarting...", {"error": str(e)})
+            self.restart_socket_server()
+            return True  # 繼續定時檢查
+
+    def restart_socket_server(self):
+        """重啟 socket server"""
+        debug_log("🔄 Restarting socket server...")
+
+        # 關閉舊的 socket
+        if self.socket_server:
+            try:
+                self.socket_server.close()
+            except:
+                pass
+
+        # 移除舊的 socket 檔案
+        if os.path.exists(SOCKET_PATH):
+            try:
+                os.remove(SOCKET_PATH)
+            except:
+                pass
+
+        # 重新啟動
+        self.socket_healthy = True
+        self.start_socket_server()
 
     def handle_notification(self, hook_data):
         """處理通知資料"""

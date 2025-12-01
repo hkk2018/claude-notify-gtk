@@ -1,0 +1,21 @@
+[Unit]
+Description=Claude Code GTK Notification Daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/ubuntu/Projects/claude-notify-gtk/src/daemon.py
+Restart=always
+RestartSec=3
+
+# Health check: 如果 socket 無法連線則重啟
+ExecStartPost=/bin/sleep 2
+ExecStartPost=/bin/sh -c 'test -S /tmp/claude-notifier.sock'
+
+# 環境變數
+Environment=DISPLAY=:1
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+
+[Install]
+WantedBy=graphical-session.target
