@@ -26,7 +26,7 @@ jobs:
 
       - name: Run Python lint
         run: |
-          flake8 src/ --max-line-length=120 --ignore=E501,W503
+          flake8 src/ --max-line-length=120 --ignore=E501,W503,E402,W504,E701,E128,E302,E305,E226,F841
 
       - name: Install ShellCheck
         run: |

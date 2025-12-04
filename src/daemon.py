@@ -9,7 +9,7 @@ Claude Code 通知守護程式
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Gdk, GdkPixbuf
+from gi.repository import Gtk, GLib, Gdk
 import json
 import datetime
 import subprocess
@@ -395,7 +395,7 @@ class FocusManager:
 
                     # 收集候選視窗
                     candidate_windows.append((wid, window_name, window_name_lower))
-                except Exception as e:
+                except Exception:
                     continue
 
             if not candidate_windows:
@@ -2761,14 +2761,14 @@ class NotificationContainer(Gtk.Window):
         if self.socket_server:
             try:
                 self.socket_server.close()
-            except:
+            except Exception:
                 pass
 
         # 移除舊的 socket 檔案
         if os.path.exists(SOCKET_PATH):
             try:
                 os.remove(SOCKET_PATH)
-            except:
+            except Exception:
                 pass
 
         # 重新啟動
@@ -2877,7 +2877,7 @@ class NotificationContainer(Gtk.Window):
                 if "permissionrequest" in event_lower:
                     # PermissionRequest hook event - 權限請求
                     icon = "🔓"
-                    title_v0 = f"{icon} [{project_name}] Permission Request"
+                    _title_v0 = f"{icon} [{project_name}] Permission Request"
                     title_v1 = f"{icon} Permission Request"
                     urgency = "critical"
                     sound = "dialog-warning"
@@ -2896,12 +2896,12 @@ class NotificationContainer(Gtk.Window):
 
                 # 只有非 PermissionRequest 才在這裡設定 title 和預設 urgency/sound
                 if "permissionrequest" not in event_lower:
-                    title_v0 = f"{icon} [{project_name}] {hook_event_name}"
+                    _title_v0 = f"{icon} [{project_name}] {hook_event_name}"
                     title_v1 = f"{icon} {hook_event_name}"
                     urgency = "normal"
                     sound = "message-new-instant"
             else:
-                title_v0 = f"💬 [{project_name}] Notification"
+                _title_v0 = f"💬 [{project_name}] Notification"
                 title_v1 = "💬 Notification"
                 urgency = "normal"
                 sound = "message-new-instant"
@@ -2916,7 +2916,7 @@ class NotificationContainer(Gtk.Window):
         body_lines.append("")  # 空行分隔
         body_lines.append(message if message else "No message")
 
-        body_v0 = "\n".join(body_lines)
+        _body_v0 = "\n".join(body_lines)
 
         # V1/V2/V3 版本：訊息本體 + 完整 metadata
         body_v1 = message if message else "No message"
@@ -2960,7 +2960,7 @@ def main():
     if not os.environ.get("DISPLAY"):
         # 嘗試常見的 DISPLAY 值
         os.environ["DISPLAY"] = ":1"
-        print(f"Warning: DISPLAY not set, using :1")
+        print("Warning: DISPLAY not set, using :1")
 
     container = NotificationContainer()
     container.show_all()
