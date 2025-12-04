@@ -2,6 +2,48 @@
 
 Thank you for your interest in contributing to claude-notify-gtk! This document provides guidelines for contributing to the project.
 
+## AI-Assisted Development
+
+This project embraces AI-assisted development. We use:
+
+- **Claude Code**: For implementing features, analyzing issues, and code review
+- **GitHub Copilot**: For automated PR code review
+- **Human oversight**: Maintainer approval required for all merges
+
+### Contribution Workflow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     PR Review Process                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Submit PR ──→ CI Automated Checks                          │
+│      │              │                                       │
+│      │              ├─→ Lint (Python + Shell)               │
+│      │              └─→ Syntax validation                   │
+│      │                    │                                 │
+│      │                    ↓                                 │
+│      │         Copilot Code Review (suggestions)            │
+│      │                    │                                 │
+│      │                    ↓                                 │
+│      └────→ Maintainer Review (required) ←──────────────────┘
+│                    │                                        │
+│                    ↓                                        │
+│            Approve & Merge (maintainer only)                │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Using AI to Contribute
+
+You're encouraged to use AI tools when contributing:
+
+1. **Claude Code** - Great for understanding the codebase and implementing changes
+2. **GitHub Copilot** - Helpful for code completion
+3. **ChatGPT/Claude** - Good for brainstorming solutions
+
+**Please disclose AI usage** in your PR using the provided template checkbox.
+
 ## Development Setup
 
 1. **Clone the repository**:
@@ -13,7 +55,7 @@ Thank you for your interest in contributing to claude-notify-gtk! This document 
 2. **Install dependencies**:
    ```bash
    # Ubuntu/Debian
-   sudo apt-get install python3-gi gir1.2-gtk-3.0
+   sudo apt-get install python3-gi gir1.2-gtk-3.0 xdotool
 
    # Optional: for sound support
    sudo apt-get install pulseaudio-utils alsa-utils
@@ -36,6 +78,7 @@ Thank you for your interest in contributing to claude-notify-gtk! This document 
 
 ### Python
 - Follow PEP 8 style guide
+- Max line length: 120 characters
 - Use meaningful variable names
 - Add docstrings for classes and public methods
 - Use type hints where beneficial
@@ -48,9 +91,18 @@ Thank you for your interest in contributing to claude-notify-gtk! This document 
 
 ### Git Commit Messages
 - Use present tense ("Add feature" not "Added feature")
+- Prefix with type: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`
 - First line should be concise (50 chars or less)
 - Add detailed explanation in body if needed
 - Reference issues with `#issue-number`
+
+Examples:
+```
+feat: Add notification sound customization
+fix: Resolve window position on multi-monitor setup
+docs: Update installation instructions for Wayland
+refactor: Simplify transcript parsing logic
+```
 
 ## Testing
 
@@ -66,15 +118,19 @@ Before submitting a pull request:
    - Test opacity adjustment
    - Test minimize and close
    - Test individual notification close
+   - Test detail dialog (⋮ button)
 
 3. **Test hook integration**:
    - Install hooks with `setup.sh`
    - Test with actual Claude Code usage
    - Check logs for errors
 
-4. **Test on clean system** (if possible):
-   - Use a VM or container
-   - Run `setup.sh` and verify installation
+4. **Enable debug logging** (for development):
+   ```python
+   # In src/daemon.py, set:
+   DEBUG_MODE = True
+   ```
+   Then check `log/debug.log` for detailed information.
 
 ## Submitting Changes
 
@@ -98,7 +154,7 @@ Before submitting a pull request:
 5. **Commit your changes**:
    ```bash
    git add .
-   git commit -m "Add: your feature description"
+   git commit -m "feat: your feature description"
    ```
 
 6. **Push to your fork**:
@@ -107,54 +163,78 @@ Before submitting a pull request:
    ```
 
 7. **Create a Pull Request**:
+   - Use the PR template
    - Describe what changes you made
    - Explain why the changes are needed
    - Reference any related issues
    - Include screenshots if UI changes
+   - Declare AI tool usage
+
+## CI/CD Pipeline
+
+Every PR automatically triggers:
+
+| Check | Description | Required |
+|-------|-------------|----------|
+| Python Lint | flake8 with max-line-length=120 | Yes |
+| Shell Lint | shellcheck on hook scripts | Yes |
+| Syntax Check | Python compile check | Yes |
+| Copilot Review | AI code review suggestions | No (advisory) |
 
 ## Reporting Bugs
 
-When reporting bugs, please include:
+Please use the **Bug Report** issue template. Include:
 
-1. **System information**:
-   - OS and version (e.g., Ubuntu 22.04)
-   - Python version
-   - GTK version
-
-2. **Steps to reproduce**:
-   - What you did
-   - What you expected to happen
-   - What actually happened
-
-3. **Logs**:
-   - Check `~/Projects/claude-notify-gtk/log/` for error messages
-   - Include relevant log excerpts
-
-4. **Screenshots** (if applicable):
-   - Show the issue visually
+1. **System information** (OS, Python version, GTK version)
+2. **Steps to reproduce**
+3. **Expected vs actual behavior**
+4. **Logs** from `log/debug.log` or `log/notify-errors.log`
+5. **Screenshots** if applicable
 
 ## Feature Requests
 
-When requesting features:
+Please use the **Feature Request** issue template. Include:
 
-1. **Describe the use case**:
-   - What problem does it solve?
-   - Who would benefit?
-
-2. **Suggest implementation** (optional):
-   - How might it work?
-   - Any technical considerations?
-
-3. **Consider alternatives**:
-   - Are there existing workarounds?
-   - Could this be a plugin/extension?
+1. **Use case description**
+2. **Proposed solution**
+3. **Alternatives considered**
+4. **Implementation ideas** (optional)
 
 ## Code Review Process
 
-1. Maintainers will review your PR
-2. Address any feedback or requested changes
-3. Once approved, maintainers will merge
-4. Your contribution will be included in the next release
+1. **Automated checks** must pass
+2. **Copilot** provides code review suggestions (advisory)
+3. **Maintainer** reviews and may request changes
+4. **Maintainer approval** required before merge
+5. **Only maintainer** can merge to main branch
+
+### Branch Protection
+
+The `main` branch has protection rules:
+- Pull request required
+- At least 1 review approval required
+- Status checks must pass
+- Only maintainers can push directly
+
+## Project Structure
+
+```
+claude-notify-gtk/
+├── src/
+│   ├── daemon.py          # Main GTK notification daemon
+│   └── client.py          # Socket client for sending notifications
+├── hooks/
+│   ├── notification-hook.sh  # Claude Code notification hook
+│   └── stop-hook.sh          # Claude Code stop hook
+├── examples/              # Test and example scripts
+├── docs/                  # Documentation
+├── .claude/
+│   └── CLAUDE.md          # AI development guide
+└── .github/
+    ├── workflows/         # CI/CD workflows
+    ├── ISSUE_TEMPLATE/    # Issue templates
+    └── PULL_REQUEST_TEMPLATE.md
+```
 
 ## License
 

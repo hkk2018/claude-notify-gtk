@@ -1,10 +1,13 @@
 ---
 title: "claude-notify-gtk"
 description: "Independent GTK-based notification system for Claude Code on Linux"
-last_modified: "2025-11-25 14:12"
+last_modified: "2025-12-04 15:21"
 ---
 
 # claude-notify-gtk
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/hkk2018/claude-notify-gtk/actions/workflows/ci.yml/badge.svg)](https://github.com/hkk2018/claude-notify-gtk/actions/workflows/ci.yml)
 
 Independent GTK-based notification system for Claude Code on Linux, featuring a draggable, scrollable notification container with sound alerts and transparency control.
 
@@ -16,214 +19,153 @@ Independent GTK-based notification system for Claude Code on Linux, featuring a 
 - **Auto-positioning**: Initially appears in the right corner, out of your work area
 - **Adjustable Transparency**: Cycle through 95%, 85%, 75%, 65%, and 100% opacity
 - **Sound Alerts**: Different sounds for different notification types (warnings, errors, completions)
-- **Persistent Notifications**: Notifications remain in the queue until manually closed, allowing you to review history
-- **Detailed Information**: Shows project name, session ID, timestamp, working directory, and message
-- **Visual Urgency**: Critical notifications (permissions, errors) have distinct red styling
-- **Time-based Color Coding**: Notification timestamps change color based on age for easy prioritization
-  - **Green** (5 min or less): Fresh, urgent notifications
+- **Persistent Notifications**: Notifications remain in the queue until manually closed
+- **Transcript Preview**: Shows last assistant response from Claude Code conversation (first 5 + last 5 lines)
+- **Detail Dialog**: Click ⋮ button to view full notification data (JSON) and copy Session ID
+- **Time-based Color Coding**: Notification timestamps change color based on age
+  - **Green** (≤5 min): Fresh notifications
   - **Yellow** (5-10 min): Recent notifications
   - **Orange** (10-20 min): Older notifications
   - **Gray** (20+ min): Archive notifications
-- **Click to Focus**: Click on notification cards to automatically focus the corresponding editor window (VSCode, Cursor, or custom)
+- **Click to Focus**: Click on notification cards to focus the corresponding editor window
 - **System Tray Icon**: Minimize to system tray, right-click for quick access
-
-## Architecture
-
-The system consists of two main components:
-
-1. **Daemon** ([src/daemon.py](src/daemon.py)): A persistent GTK application that displays notifications
-   - Runs in the background listening on a Unix socket (`/tmp/claude-notifier.sock`)
-   - Manages the notification container window
-   - Handles notification display, sound playback, and auto-cleanup
-
-2. **Client** ([src/client.py](src/client.py)): Sends notification requests to the daemon
-   - Accepts JSON data from stdin
-   - Connects to the daemon via Unix socket
-   - Used by Claude Code hook scripts
-
-3. **Hook Scripts** ([hooks/](hooks/)): Integration with Claude Code
-   - `notification-hook.sh`: Handles Claude Code Notification events
-   - `stop-hook.sh`: Handles Claude Code Stop events
+- **Debug Logging**: Toggle debug mode for troubleshooting (see [DEBUG-LOGGING.md](docs/DEBUG-LOGGING.md))
 
 ## Requirements
 
 - Linux with GTK 3.0
 - Python 3 with PyGObject (pre-installed on Ubuntu)
 - Claude Code CLI or VSCode extension
-- `xdotool` for focus feature (install: `sudo apt install xdotool`)
+- `xdotool` for focus feature: `sudo apt install xdotool`
 - `paplay` or `aplay` for sound support (optional)
-- `jq` for JSON logging and custom focus scripts (optional)
+- `jq` for JSON logging (optional)
 
-## Installation
+## Quick Start
 
-1. **Clone the repository**:
-   ```bash
-   cd ~/Projects
-   git clone git@github.com:hkk2018/claude-notify-gtk.git
-   cd claude-notify-gtk
-   ```
+```bash
+# Clone
+git clone https://github.com/hkk2018/claude-notify-gtk.git
+cd claude-notify-gtk
 
-2. **Run the setup script**:
-   ```bash
-   chmod +x setup.sh
-   ./setup.sh
-   ```
+# Install
+chmod +x setup.sh && ./setup.sh
 
-   This will:
-   - Make scripts executable
-   - Configure Claude Code hooks in `~/.claude/settings.json`
-   - Create log directory
-   - Set up the daemon to auto-start on login
+# Start daemon
+./src/daemon.py &
+```
 
-3. **Start the daemon**:
-   ```bash
-   ~/Projects/claude-notify-gtk/src/daemon.py &
-   ```
+## Architecture
 
-   Or log out and log back in for auto-start to take effect.
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Claude Code                              │
+│                         │                                    │
+│                    Hook Events                               │
+│                         │                                    │
+│    ┌────────────────────┴────────────────────┐              │
+│    ↓                                         ↓              │
+│ notification-hook.sh                    stop-hook.sh        │
+│    │                                         │              │
+│    └────────────────────┬────────────────────┘              │
+│                         │                                    │
+│                         ↓                                    │
+│                    client.py                                 │
+│                         │                                    │
+│              Unix Socket (/tmp/claude-notifier.sock)        │
+│                         │                                    │
+│                         ↓                                    │
+│                    daemon.py                                 │
+│                    (GTK Window)                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Usage
 
-### Basic Usage
-
-Once installed, the notification system will automatically display notifications when:
-- Claude Code requires permission approval
-- Claude Code is waiting for your input
-- Claude Code completes a task
-- Claude Code encounters an error
-- Claude Code authentication succeeds
-
 ### Window Controls
 
-- **Drag**: Click and drag the header to reposition the window
-- **Transparency**: Click the percentage button to cycle through opacity levels
-- **Clear All**: Remove all notifications at once
-- **Minimize**: Hide the window (will reappear when new notifications arrive)
-- **Close Individual**: Click the × button on any notification card
-- **System Tray**: Left-click tray icon to show/hide window, right-click for menu
+| Action | Description |
+|--------|-------------|
+| **Drag** | Click and drag header to reposition |
+| **Opacity** | Click percentage button to cycle opacity |
+| **Clear All** | Remove all notifications |
+| **⋮ Detail** | View full notification data |
+| **→ Focus** | Click card to focus editor window |
 
 ### Focus Feature
 
-**Click on any notification card to automatically focus the corresponding editor window.**
+Click on any notification card to automatically focus the corresponding editor window.
 
-Configure focus behavior in `~/.config/claude-notify-gtk/focus-mapping.json`:
+Configure in `~/.config/claude-notify-gtk/focus-mapping.json`:
 
 ```json
 {
   "projects": {
-    "/home/ubuntu/Projects/my-project": {
-      "type": "vscode"
-    }
+    "/home/user/my-project": { "type": "vscode" }
   },
-  "default": {
-    "type": "vscode"
-  }
+  "default": { "type": "cursor" }
 }
 ```
 
-**Supported editor types:**
-- `vscode`: Visual Studio Code
-- `cursor`: Cursor Editor
-- `custom`: Run your own focus script
+Supported: `vscode`, `cursor`, `custom`
 
-For advanced configuration and custom focus scripts, see:
-- [Focus Feature Guide](docs/focus-feature-guide.md) - Complete user guide
-- [Focus Mapping Configuration](docs/focus-mapping.md) - Detailed configuration options
-- [Custom Focus Example](examples/custom-focus-example.sh) - Sample custom script
+See [Focus Feature Guide](docs/focus-feature-guide.md) for details.
 
-**Quick test:**
-```bash
-# Test focus functionality
-~/Projects/claude-notify-gtk/examples/test-focus.sh
+### Debug Mode
+
+Enable debug logging in `src/daemon.py`:
+
+```python
+DEBUG_MODE = True
 ```
 
-### Manual Testing
-
-Send a test notification:
+View logs:
 ```bash
-echo '{"cwd": "/home/user/test", "message": "Test notification", "session_id": "test-123"}' | ~/Projects/claude-notify-gtk/src/client.py
+./view-debug-log.sh tail  # Real-time monitoring
+./view-debug-log.sh last  # Last 50 lines
 ```
 
-Test time-based color coding (displays notifications with different ages):
-```bash
-~/Projects/claude-notify-gtk/test-time-colors.sh
-```
-
-### Notification Types
-
-The system automatically detects notification types and applies appropriate styling and sounds:
-
-- **🔐 Permission Required** (critical): Red border, warning sound
-- **⏸️ Waiting for Input** (critical): Red border, question sound
-- **✅ Auth Success** (normal): Blue border, completion sound
-- **❌ Error** (critical): Red border, error sound
-- **✅ Task Completed** (normal): Blue border, instant message sound
+See [DEBUG-LOGGING.md](docs/DEBUG-LOGGING.md) for details.
 
 ## Configuration
 
-### Claude Code Settings
+### Claude Code Hooks
 
-Hook configuration is stored in `~/.claude/settings.json`:
+Configured automatically by `setup.sh` in `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "Notification": [{
-      "hooks": [{
-        "type": "command",
-        "command": "/home/ubuntu/Projects/claude-notify-gtk/hooks/notification-hook.sh"
-      }]
-    }],
-    "Stop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "/home/ubuntu/Projects/claude-notify-gtk/hooks/stop-hook.sh"
-      }]
-    }]
+    "Notification": [{ "hooks": [{ "type": "command", "command": ".../notification-hook.sh" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": ".../stop-hook.sh" }] }]
   }
 }
 ```
 
 ### Customization
 
-Edit [src/daemon.py](src/daemon.py) to customize:
-
-- **Window size**: Modify `set_default_size(400, 600)` in `setup_window()`
-- **Opacity levels**: Change the `opacities` list in `toggle_opacity()`
-- **Colors and styling**: Edit the CSS in `apply_styles()`
-- **Socket path**: Change `SOCKET_PATH` constant
-- **Notification persistence**: Notifications now persist until manually closed for better message history tracking
+Edit `src/daemon.py` to customize:
+- Window size: `set_default_size(400, 600)`
+- Opacity levels: `opacities` list
+- Colors: CSS in `apply_styles()`
 
 ## Troubleshooting
 
 ### Daemon not running
 ```bash
-# Check if daemon is running
 ps aux | grep daemon.py
-
-# Start manually
-~/Projects/claude-notify-gtk/src/daemon.py &
+./src/daemon.py &
 ```
 
-### Notifications not appearing
-
-1. Check daemon is running (see above)
-2. Check logs:
-   ```bash
-   tail -f ~/Projects/claude-notify-gtk/log/notifications.log
-   tail -f ~/Projects/claude-notify-gtk/log/notify-errors.log
-   ```
-
-3. Test the client directly:
-   ```bash
-   echo '{"message": "test"}' | ~/Projects/claude-notify-gtk/src/client.py
-   ```
-
-### No sound
-
-Install sound players:
+### Check logs
 ```bash
-sudo apt-get install pulseaudio-utils alsa-utils
+tail -f log/notifications.log
+tail -f log/notify-errors.log
+./view-debug-log.sh tail  # Debug mode
+```
+
+### Test manually
+```bash
+echo '{"message": "test"}' | ./src/client.py
 ```
 
 ## Project Structure
@@ -232,69 +174,37 @@ sudo apt-get install pulseaudio-utils alsa-utils
 claude-notify-gtk/
 ├── src/
 │   ├── daemon.py          # GTK notification daemon
-│   └── client.py          # Notification sender client
+│   └── client.py          # Socket client
 ├── hooks/
-│   ├── notification-hook.sh   # Claude Code Notification hook
-│   └── stop-hook.sh           # Claude Code Stop hook
-├── examples/
-│   └── test-notification.sh   # Test script
-├── docs/
-│   └── screenshots/       # Documentation images
-├── log/                   # Log files (created on first run)
-├── README.md
-├── LICENSE
-└── setup.sh              # Installation script
+│   ├── notification-hook.sh
+│   └── stop-hook.sh
+├── examples/              # Test scripts
+├── docs/                  # Documentation
+├── .github/
+│   ├── workflows/ci.yml   # CI pipeline
+│   ├── ISSUE_TEMPLATE/    # Issue templates
+│   └── PULL_REQUEST_TEMPLATE.md
+└── setup.sh               # Installation script
 ```
-
-## Why GTK?
-
-GTK (GIMP Toolkit) is chosen because:
-
-1. **Native Linux Support**: Pre-installed on most Linux distributions
-2. **Python Bindings**: PyGObject provides easy Python integration
-3. **No External Dependencies**: No need to install Node.js, Electron, or other frameworks
-4. **Lightweight**: Minimal resource usage
-5. **Full Control**: Complete customization of appearance and behavior
-
-## Why Not D-Bus?
-
-D-Bus notifications (`notify-send`) have limitations:
-
-- Only one daemon can own the `org.freedesktop.Notifications` service name
-- GNOME Shell already occupies this, causing conflicts
-- Limited stacking and customization options
-- Can't create a persistent, draggable container
-
-Our Unix socket approach provides:
-- Complete independence from system notification service
-- Full control over notification display and behavior
-- No conflicts with existing notification systems
-
-## Why XDG Autostart (Not systemd)?
-
-GTK desktop applications require access to the X server and graphical session, which systemd user services don't have by default. Using systemd would result in:
-
-- **Authorization errors**: "Authorization required, but no authorization protocol specified"
-- **GTK initialization failures**: Cannot connect to display server
-- **Additional complexity**: Requires manual X server permission setup
-
-XDG Autostart (`~/.config/autostart/*.desktop`) is the standard way to auto-start desktop applications because:
-
-- **Runs in graphical session**: Automatically has access to X server and DBUS
-- **Desktop environment native**: Supported by GNOME, KDE, XFCE, etc.
-- **Zero configuration**: Works out of the box without manual permissions
-- **Standard practice**: Used by most Linux desktop applications
-
-The `setup.sh` script automatically creates the XDG autostart entry for you.
-
-## License
-
-MIT License - See [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
-Contributions welcome! Please feel free to submit issues or pull requests.
+We embrace AI-assisted development! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Development setup
+- Code style guidelines
+- PR process (CI + Copilot review + maintainer approval)
+- How to use AI tools effectively
+
+## Why GTK? Why Not D-Bus?
+
+**GTK**: Native Linux, pre-installed, lightweight, no extra dependencies.
+
+**Not D-Bus**: Avoids conflicts with GNOME notifications, provides full customization control.
+
+## License
+
+MIT License - See [LICENSE](LICENSE)
 
 ## Credits
 
-Created for the Claude Code community to provide better notification handling on Linux systems.
+Created for the Claude Code community. AI-assisted development with Claude Code and GitHub Copilot.
