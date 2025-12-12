@@ -2338,10 +2338,59 @@ class NotificationContainer(Gtk.Window):
         )
 
     def create_tray_icon(self):
-        """創建系統托盤圖標"""
+        """創建系統托盤圖標
+
+        針對系統托盤圖標對齊問題的改進：
+        1. 使用明確大小的 pixbuf（22x22）而非 symbolic icon
+        2. 支援自訂圖標檔案（優先）
+        3. Fallback 到非 symbolic 系統圖標（對齊較好）
+        """
         # 使用 StatusIcon (GTK3)
         self.status_icon = Gtk.StatusIcon()
-        self.status_icon.set_from_icon_name("preferences-system-notifications-symbolic")
+
+        # 嘗試使用自訂圖標檔案（如果存在）
+        icon_path = PROJECT_ROOT / "assets" / "icon.png"
+        if icon_path.exists():
+            # 從檔案載入，並設定大小為 22x22（標準托盤圖標尺寸）
+            # 這樣可以確保圖標在托盤中正確對齊
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                    str(icon_path),
+                    22, 22,  # 標準托盤圖標尺寸
+                    True     # preserve aspect ratio
+                )
+                self.status_icon.set_from_pixbuf(pixbuf)
+                debug_log("✅ 使用自訂托盤圖標", {"path": str(icon_path)})
+            except Exception as e:
+                debug_log(f"⚠️ 載入自訂圖標失敗: {e}")
+                # Fallback to system icon (non-symbolic for better alignment)
+                self.status_icon.set_from_icon_name("notification-message-im")
+        else:
+            # 使用系統圖標（非 symbolic，對齊較好）
+            # symbolic icon 在某些系統托盤實現上可能會有對齊問題
+            # 優先嘗試清單：notification 相關圖標
+            icon_names = [
+                "notification-message-im",     # 訊息通知
+                "notification-new",            # 新通知
+                "dialog-information",          # 資訊對話框
+                "mail-unread",                 # 未讀郵件
+                "emblem-important"             # 重要標記
+            ]
+
+            icon_theme = Gtk.IconTheme.get_default()
+            icon_found = False
+            for icon_name in icon_names:
+                if icon_theme.has_icon(icon_name):
+                    self.status_icon.set_from_icon_name(icon_name)
+                    icon_found = True
+                    debug_log(f"✅ 使用系統圖標: {icon_name}")
+                    break
+
+            if not icon_found:
+                # 最後 fallback
+                self.status_icon.set_from_icon_name("application-x-executable")
+                debug_log("⚠️ 使用 fallback 圖標: application-x-executable")
+
         self.status_icon.set_tooltip_text("Claude Code Notifier")
         self.status_icon.set_visible(True)
 
