@@ -49,6 +49,15 @@ def debug_log(message, data=None):
         # 確保 log 目錄存在
         DEBUG_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+        # 檢查檔案大小，超過限制就輪替
+        MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB
+        if DEBUG_LOG_FILE.exists() and DEBUG_LOG_FILE.stat().st_size > MAX_LOG_SIZE:
+            # 輪替：保留最近一個備份
+            backup_file = DEBUG_LOG_FILE.with_suffix('.log.1')
+            if backup_file.exists():
+                backup_file.unlink()
+            DEBUG_LOG_FILE.rename(backup_file)
+
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
         with open(DEBUG_LOG_FILE, 'a', encoding='utf-8') as f:
@@ -75,6 +84,8 @@ def extract_last_messages_from_transcript(transcript_path, head_lines=5, tail_li
     Claude Code 的 transcript 是 .jsonl 格式（JSON Lines），每行一個 JSON 物件。
     只提取最後一條 assistant 訊息，顯示前 N 行 + ... + 後 N 行。
 
+    優化：只讀取檔案最後 N 行，避免大檔案阻塞 UI。
+
     Args:
         transcript_path: transcript 文件路徑（.jsonl 格式）
         head_lines: 顯示開頭幾行（預設 5）
@@ -95,24 +106,57 @@ def extract_last_messages_from_transcript(transcript_path, head_lines=5, tail_li
             debug_log("❌ Transcript 檔案不存在或路徑為空")
             return None
 
+        # 檢查檔案大小，決定讀取策略
+        file_size = os.path.getsize(transcript_path)
+        MAX_READ_SIZE = 512 * 1024  # 512KB - 只讀取最後這麼多
+
+        debug_log("📊 檔案大小檢查", {
+            "檔案大小": file_size,
+            "最大讀取": MAX_READ_SIZE,
+            "需要截斷": file_size > MAX_READ_SIZE
+        })
+
         # 讀取 .jsonl 檔案，只保留 assistant 訊息
+        # 優化：大檔案只讀取尾部
         assistant_messages = []
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
+
+        if file_size > MAX_READ_SIZE:
+            # 大檔案：只讀取最後 512KB
+            with open(transcript_path, 'rb') as f:
+                f.seek(-MAX_READ_SIZE, 2)  # 從檔尾往前 seek
+                # 跳過可能被截斷的第一行
+                f.readline()
+                # 讀取剩餘內容
+                content = f.read().decode('utf-8', errors='ignore')
+
+            for line in content.split('\n'):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     entry = json.loads(line)
-                    # 只篩選 assistant 類型的訊息
                     if entry.get('type') == 'assistant':
                         assistant_messages.append(entry)
                 except json.JSONDecodeError:
                     continue
+        else:
+            # 小檔案：正常讀取
+            with open(transcript_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get('type') == 'assistant':
+                            assistant_messages.append(entry)
+                    except json.JSONDecodeError:
+                        continue
 
         debug_log("📨 Transcript JSONL 解析結果", {
             "assistant 訊息數": len(assistant_messages),
-            "類型": "JSONL (JSON Lines)"
+            "類型": "JSONL (JSON Lines)",
+            "讀取模式": "tail" if file_size > MAX_READ_SIZE else "full"
         })
 
         if not assistant_messages:
@@ -1188,8 +1232,9 @@ class NotificationCardV3(Gtk.Box):
         transcript_read_success = False
 
         if transcript_path:
-            head_lines = self.config["behavior"].get("transcript_head_lines", 5)
-            tail_lines = self.config["behavior"].get("transcript_tail_lines", 5)
+            # 使用預設值，不依賴 config（NotificationCardV3 沒有 config 屬性）
+            head_lines = 5
+            tail_lines = 5
             transcript_content = extract_last_messages_from_transcript(
                 transcript_path, head_lines=head_lines, tail_lines=tail_lines
             )
@@ -3049,13 +3094,83 @@ class NotificationContainer(Gtk.Window):
         self.add_notification(title_v1, body_v1, urgency, sound, metadata, card_version=3, notification_data=notification_data)
 
 
+def detect_display_environment():
+    """偵測並設定正確的顯示環境
+
+    自動偵測 DISPLAY 和 GDK_BACKEND，支援：
+    - X11 (傳統 X Window)
+    - Wayland (新一代顯示協議)
+    - XWayland (Wayland 下的 X11 相容層)
+
+    Returns:
+        dict: 偵測結果資訊
+    """
+    info = {
+        "session_type": os.environ.get("XDG_SESSION_TYPE", "unknown"),
+        "display_before": os.environ.get("DISPLAY", ""),
+        "wayland_display": os.environ.get("WAYLAND_DISPLAY", ""),
+        "gdk_backend_before": os.environ.get("GDK_BACKEND", ""),
+        "actions": []
+    }
+
+    # 1. 偵測 session 類型
+    session_type = info["session_type"]
+
+    # 2. 處理 DISPLAY
+    if not os.environ.get("DISPLAY"):
+        # 嘗試找到可用的 X11 display
+        for display in [":0", ":1", ":2"]:
+            socket_path = f"/tmp/.X11-unix/X{display[1:]}"
+            if os.path.exists(socket_path):
+                os.environ["DISPLAY"] = display
+                info["actions"].append(f"Set DISPLAY={display} (found X11 socket)")
+                break
+        else:
+            # Fallback
+            os.environ["DISPLAY"] = ":0"
+            info["actions"].append("Set DISPLAY=:0 (fallback)")
+
+    # 3. 處理 GDK_BACKEND
+    # 只在沒有設定時才介入，尊重用戶的設定
+    if not os.environ.get("GDK_BACKEND"):
+        if session_type == "wayland" and info["wayland_display"]:
+            # Wayland session，讓 GTK 自動選擇（優先 Wayland）
+            # 不強制設定，GTK 會自己處理
+            info["actions"].append("GDK_BACKEND not set, letting GTK auto-detect (Wayland session)")
+        elif session_type == "x11" or os.environ.get("DISPLAY"):
+            # X11 session 或有 DISPLAY，不需要特別設定
+            info["actions"].append("GDK_BACKEND not set, letting GTK auto-detect (X11 session)")
+        else:
+            info["actions"].append("GDK_BACKEND not set, no session detected")
+
+    # 4. 防止意外使用 Broadway（Web 渲染後端）
+    # Broadway 通常是透過 broadwayd 啟動，會設定特殊的環境變數
+    if os.environ.get("GDK_BACKEND") == "broadway" or os.environ.get("BROADWAY_DISPLAY"):
+        # 如果偵測到 Broadway 但實際上有正常的 display，優先使用
+        if info["wayland_display"]:
+            os.environ["GDK_BACKEND"] = "wayland"
+            info["actions"].append("Overrode Broadway with Wayland backend")
+        elif os.environ.get("DISPLAY"):
+            os.environ["GDK_BACKEND"] = "x11"
+            info["actions"].append("Overrode Broadway with X11 backend")
+
+    info["display_after"] = os.environ.get("DISPLAY", "")
+    info["gdk_backend_after"] = os.environ.get("GDK_BACKEND", "auto")
+
+    return info
+
+
 def main():
     """主程式"""
-    # 確保 DISPLAY 環境變數存在
-    if not os.environ.get("DISPLAY"):
-        # 嘗試常見的 DISPLAY 值
-        os.environ["DISPLAY"] = ":1"
-        print(f"Warning: DISPLAY not set, using :1")
+    # 偵測並設定顯示環境
+    display_info = detect_display_environment()
+
+    # 記錄環境偵測結果
+    debug_log("🖥️ 顯示環境偵測", display_info)
+
+    if display_info["actions"]:
+        for action in display_info["actions"]:
+            print(f"Display setup: {action}")
 
     container = NotificationContainer()
     container.show_all()
