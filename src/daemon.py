@@ -191,7 +191,9 @@ DEFAULT_CONFIG = {
         "auto_hide_empty": False,
         "max_notifications": 50,
         "scroll_to_newest": True,
-        "shortcut_max_chars": 10
+        "shortcut_max_chars": 10,
+        "transcript_head_lines": 5,
+        "transcript_tail_lines": 5
     },
     "notification_content": {
         "show_timestamp": True,
@@ -1186,7 +1188,11 @@ class NotificationCardV3(Gtk.Box):
         transcript_read_success = False
 
         if transcript_path:
-            transcript_content = extract_last_messages_from_transcript(transcript_path)
+            head_lines = self.config["behavior"].get("transcript_head_lines", 5)
+            tail_lines = self.config["behavior"].get("transcript_tail_lines", 5)
+            transcript_content = extract_last_messages_from_transcript(
+                transcript_path, head_lines=head_lines, tail_lines=tail_lines
+            )
             transcript_found = True
             transcript_read_success = transcript_content is not None
             debug_log("📖 Transcript 內容提取結果", {
@@ -1800,6 +1806,42 @@ class SettingsDialog(Gtk.Dialog):
         self.shortcut_chars_spin = shortcut_chars_spin
         row += 1
 
+        # Transcript 預覽行數設定
+        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        separator.set_margin_top(8)
+        separator.set_margin_bottom(8)
+        grid.attach(separator, 0, row, 2, 1)
+        row += 1
+
+        section_label = Gtk.Label(label="<b>Transcript Preview</b>", xalign=0)
+        section_label.set_use_markup(True)
+        grid.attach(section_label, 0, row, 2, 1)
+        row += 1
+
+        # 頭部行數
+        label = Gtk.Label(label="Head Lines:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        head_lines_spin = Gtk.SpinButton()
+        head_lines_spin.set_range(1, 20)
+        head_lines_spin.set_increments(1, 5)
+        head_lines_spin.set_value(self.config["behavior"].get("transcript_head_lines", 5))
+        grid.attach(head_lines_spin, 1, row, 1, 1)
+        self.head_lines_spin = head_lines_spin
+        row += 1
+
+        # 尾部行數
+        label = Gtk.Label(label="Tail Lines:", xalign=0)
+        grid.attach(label, 0, row, 1, 1)
+
+        tail_lines_spin = Gtk.SpinButton()
+        tail_lines_spin.set_range(1, 20)
+        tail_lines_spin.set_increments(1, 5)
+        tail_lines_spin.set_value(self.config["behavior"].get("transcript_tail_lines", 5))
+        grid.attach(tail_lines_spin, 1, row, 1, 1)
+        self.tail_lines_spin = tail_lines_spin
+        row += 1
+
         return grid
 
     def get_updated_config(self):
@@ -1820,6 +1862,8 @@ class SettingsDialog(Gtk.Dialog):
         config["behavior"]["sound_enabled"] = self.sound_switch.get_active()
         config["behavior"]["max_notifications"] = int(self.max_notif_spin.get_value())
         config["behavior"]["shortcut_max_chars"] = int(self.shortcut_chars_spin.get_value())
+        config["behavior"]["transcript_head_lines"] = int(self.head_lines_spin.get_value())
+        config["behavior"]["transcript_tail_lines"] = int(self.tail_lines_spin.get_value())
 
         return config
 
@@ -1898,6 +1942,8 @@ class SettingsDialog(Gtk.Dialog):
         self.sound_switch.set_active(DEFAULT_CONFIG["behavior"]["sound_enabled"])
         self.max_notif_spin.set_value(DEFAULT_CONFIG["behavior"]["max_notifications"])
         self.shortcut_chars_spin.set_value(DEFAULT_CONFIG["behavior"]["shortcut_max_chars"])
+        self.head_lines_spin.set_value(DEFAULT_CONFIG["behavior"]["transcript_head_lines"])
+        self.tail_lines_spin.set_value(DEFAULT_CONFIG["behavior"]["transcript_tail_lines"])
 
         # 控件的 value-changed 信號會自動觸發 on_preview_change，所以不需要手動調用
 
