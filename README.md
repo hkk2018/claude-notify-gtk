@@ -11,6 +11,12 @@ last_modified: "2025-12-04 15:21"
 
 Independent GTK-based notification system for Claude Code on Linux, featuring a draggable, scrollable notification container with sound alerts and transparency control.
 
+## Screenshot
+
+![Claude Code Notifications Demo](assets/demo-1.png)
+
+*Notification window showing multiple Claude Code session updates with transcript previews and time-based color coding.*
+
 ## Features
 
 - **Independent Notification System**: Does NOT use D-Bus, avoiding conflicts with GNOME notifications
