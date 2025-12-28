@@ -2,9 +2,14 @@
 # Claude Code Stop Hook for Linux
 # 當 Claude 停止時的處理
 
-# 設定 DISPLAY 環境變數（VSCode Extension 環境可能缺少）
+# 設定 DISPLAY/XAUTHORITY 環境變數（VSCode Extension 環境可能缺少）
+# 優先使用現有環境變數，否則用標準預設值
+# 詳見: docs/dev-logs/2025-12-26-display-env-detection.md
 if [ -z "$DISPLAY" ]; then
     export DISPLAY=:0
+fi
+if [ -z "$XAUTHORITY" ]; then
+    export XAUTHORITY="$HOME/.Xauthority"
 fi
 
 # 讀取從 stdin 傳入的 JSON 資料

@@ -14,7 +14,9 @@ ExecStartPost=/bin/sleep 2
 ExecStartPost=/bin/sh -c 'test -S /tmp/claude-notifier.sock'
 
 # 環境變數
-Environment=DISPLAY=:1
+# 注意：不寫死 DISPLAY，讓 systemd 從 graphical-session 繼承
+# 如果繼承失敗，使用標準預設值
+# 詳見: docs/dev-logs/2025-12-26-display-env-detection.md
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 
 [Install]
