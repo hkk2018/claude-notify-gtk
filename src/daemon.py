@@ -2786,6 +2786,13 @@ class NotificationContainer(Gtk.Window):
             card_version: 0 = V0, 1 = V1, 2 = V2, 3 = V3（優化版面）
             notification_data: 完整的通知資料（用於 focus 功能）
         """
+        # 檢查是否超過上限，清理最舊的通知
+        max_notif = self.config.get("behavior", {}).get("max_notifications", 50)
+        while len(self.notifications) >= max_notif:
+            oldest = self.notifications[0]
+            self.remove_notification(oldest)
+            oldest.destroy()  # 確保 GTK widget 被銷毀，釋放資源
+
         # 播放音效
         if sound:
             self.play_sound(sound)
