@@ -304,6 +304,7 @@ class FocusManager:
         self.mapping = self.load_focus_mapping()
         self.log_file = CONFIG_DIR / "focus-errors.log"
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        self._display = None  # 重用 Xlib Display 連線，避免 fd 洩漏
 
     def load_focus_mapping(self):
         """載入 focus mapping 設定檔"""
@@ -321,6 +322,35 @@ class FocusManager:
                 json.dump(self.DEFAULT_FOCUS_MAPPING, f, indent=2, ensure_ascii=False)
             print(f"Created default focus mapping at: {FOCUS_MAPPING_FILE}")
             return self.DEFAULT_FOCUS_MAPPING.copy()
+
+    def _get_display(self):
+        """取得可重用的 Xlib Display 連線
+
+        避免每次 focus 操作都開新連線造成 fd 洩漏。
+        如果連線失效會自動重建。
+
+        Returns:
+            Xlib Display 物件
+        """
+        from Xlib import display as xlib_display
+
+        env_display = os.environ.get("DISPLAY", ":1")
+
+        if self._display is not None:
+            try:
+                # 測試連線是否仍有效
+                self._display.get_display_name()
+                return self._display
+            except Exception:
+                # 連線失效，關閉後重建
+                try:
+                    self._display.close()
+                except Exception:
+                    pass
+                self._display = None
+
+        self._display = xlib_display.Display(env_display)
+        return self._display
 
     def get_focus_config(self, project_path):
         """根據專案路徑取得 focus 設定
@@ -463,11 +493,11 @@ class FocusManager:
             # 第二步：使用完整的多步驟 X11 focus 流程
             # Electron 應用需要多個步驟才能正確 focus
             try:
-                from Xlib import X, display, Xatom
+                from Xlib import X, Xatom
                 from Xlib.protocol import event
                 import time
 
-                d = display.Display(env.get("DISPLAY", ":1"))
+                d = self._get_display()
                 root = d.screen().root
                 target_window = d.create_resource_object('window', int(window_id))
                 active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
@@ -553,6 +583,8 @@ class FocusManager:
                 self.log_error("python3-xlib not installed. Please install: sudo apt install python3-xlib")
                 return False
             except Exception as e:
+                # 連線可能已損壞，重置以便下次重建
+                self._display = None
                 self.log_error(f"Xlib focus failed: {e}")
                 return False
 
@@ -767,15 +799,11 @@ class FocusManager:
             True if successful, False otherwise
         """
         try:
-            env = os.environ.copy()
-            if not env.get("DISPLAY"):
-                env["DISPLAY"] = ":1"
-
-            from Xlib import X, display
+            from Xlib import X
             from Xlib.protocol import event
             import time
 
-            d = display.Display(env.get("DISPLAY", ":1"))
+            d = self._get_display()
             root = d.screen().root
             target_window = d.create_resource_object('window', int(window_id))
             active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
@@ -832,6 +860,8 @@ class FocusManager:
             self.log_error("python3-xlib not installed")
             return False
         except Exception as e:
+            # 連線可能已損壞，重置以便下次重建
+            self._display = None
             self.log_error(f"focus_window_by_id failed: {e}")
             return False
 
