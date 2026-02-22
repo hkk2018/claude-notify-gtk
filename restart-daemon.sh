@@ -15,8 +15,9 @@ fi
 pkill -f "daemon.py" 2>/dev/null
 sleep 1
 
-# 啟動新 daemon
-~/Projects/ken/claude-notify-gtk/src/daemon.py &
+# 啟動新 daemon (用 nohup 確保不會隨 shell 結束)
+nohup ~/Projects/ken/claude-notify-gtk/src/daemon.py > /dev/null 2>&1 &
+disown
 
 sleep 2
 
