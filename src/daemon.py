@@ -305,6 +305,7 @@ class FocusManager:
         self.log_file = CONFIG_DIR / "focus-errors.log"
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         self._display = None  # 重用 Xlib Display 連線，避免 fd 洩漏
+        self._display_lock = threading.Lock()  # Xlib Display 非 thread-safe，需要 lock
 
     def load_focus_mapping(self):
         """載入 focus mapping 設定檔"""
@@ -328,6 +329,7 @@ class FocusManager:
 
         避免每次 focus 操作都開新連線造成 fd 洩漏。
         如果連線失效會自動重建。
+        呼叫者必須持有 self._display_lock（python-xlib Display 非 thread-safe）。
 
         Returns:
             Xlib Display 物件
@@ -497,85 +499,86 @@ class FocusManager:
                 from Xlib.protocol import event
                 import time
 
-                d = self._get_display()
-                root = d.screen().root
-                target_window = d.create_resource_object('window', int(window_id))
-                active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
+                with self._display_lock:
+                    d = self._get_display()
+                    root = d.screen().root
+                    target_window = d.create_resource_object('window', int(window_id))
+                    active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
 
-                # Step 1: WM_CHANGE_STATE (取消最小化)
-                wm_state = d.intern_atom("WM_CHANGE_STATE")
-                ev = event.ClientMessage(
-                    window=target_window,
-                    client_type=wm_state,
-                    data=(32, [1, 0, 0, 0, 0])  # NormalState
-                )
-                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
-                d.flush()
-                time.sleep(0.1)
+                    # Step 1: WM_CHANGE_STATE (取消最小化)
+                    wm_state = d.intern_atom("WM_CHANGE_STATE")
+                    ev = event.ClientMessage(
+                        window=target_window,
+                        client_type=wm_state,
+                        data=(32, [1, 0, 0, 0, 0])  # NormalState
+                    )
+                    root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                    d.flush()
+                    time.sleep(0.1)
 
-                # Step 2: _NET_ACTIVE_WINDOW ClientMessage (請求視窗管理器 focus)
-                current_time = int(time.time() * 1000) & 0xFFFFFFFF
-                ev = event.ClientMessage(
-                    window=target_window,
-                    client_type=active_window_atom,
-                    data=(32, [2, current_time, 0, 0, 0])  # source=2 (pager), timestamp
-                )
-                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
-                d.flush()
-                time.sleep(0.1)
+                    # Step 2: _NET_ACTIVE_WINDOW ClientMessage (請求視窗管理器 focus)
+                    current_time = int(time.time() * 1000) & 0xFFFFFFFF
+                    ev = event.ClientMessage(
+                        window=target_window,
+                        client_type=active_window_atom,
+                        data=(32, [2, current_time, 0, 0, 0])  # source=2 (pager), timestamp
+                    )
+                    root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                    d.flush()
+                    time.sleep(0.1)
 
-                # Step 3: 直接設定 _NET_ACTIVE_WINDOW 屬性（確保設定生效）
-                root.change_property(
-                    active_window_atom,
-                    Xatom.WINDOW,
-                    32,
-                    [int(window_id)],
-                    X.PropModeReplace
-                )
-                d.sync()
-                time.sleep(0.1)
+                    # Step 3: 直接設定 _NET_ACTIVE_WINDOW 屬性（確保設定生效）
+                    root.change_property(
+                        active_window_atom,
+                        Xatom.WINDOW,
+                        32,
+                        [int(window_id)],
+                        X.PropModeReplace
+                    )
+                    d.sync()
+                    time.sleep(0.1)
 
-                # Step 4: map 視窗（確保可見）
-                target_window.map()
-                d.flush()
-                time.sleep(0.1)
+                    # Step 4: map 視窗（確保可見）
+                    target_window.map()
+                    d.flush()
+                    time.sleep(0.1)
 
-                # Step 5: raise 視窗（移到最上層）
-                target_window.configure(stack_mode=X.Above)
-                d.flush()
-                time.sleep(0.1)
+                    # Step 5: raise 視窗（移到最上層）
+                    target_window.configure(stack_mode=X.Above)
+                    d.flush()
+                    time.sleep(0.1)
 
-                # Step 6: 直接設定 keyboard focus（關鍵！）
-                target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
-                d.flush()
-                d.sync()
-                time.sleep(0.1)
+                    # Step 6: 直接設定 keyboard focus（關鍵！）
+                    target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+                    d.flush()
+                    d.sync()
+                    time.sleep(0.1)
 
-                # 雙重 Focus 機制（解決 Electron 應用的 focus 問題）
-                #
-                # **問題**：VSCode/Cursor 等 Electron 應用在第一次 focus 時，
-                # 只會 focus 到應用程序本身，而不會 focus 到具體的編輯器視窗。
-                # 第二次點擊才會真正 focus 到目標視窗。
-                #
-                # **解決方案**：在程式中連續執行兩次 focus 流程（Steps 7-8），
-                # 模擬「第二次點擊」的效果，確保一次點擊就能成功 focus。
-                #
-                # Step 7: 再次發送 _NET_ACTIVE_WINDOW ClientMessage
-                current_time = int(time.time() * 1000) & 0xFFFFFFFF
-                ev = event.ClientMessage(
-                    window=target_window,
-                    client_type=active_window_atom,
-                    data=(32, [2, current_time, 0, 0, 0])
-                )
-                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
-                d.flush()
-                time.sleep(0.05)
+                    # 雙重 Focus 機制（解決 Electron 應用的 focus 問題）
+                    #
+                    # **問題**：VSCode/Cursor 等 Electron 應用在第一次 focus 時，
+                    # 只會 focus 到應用程序本身，而不會 focus 到具體的編輯器視窗。
+                    # 第二次點擊才會真正 focus 到目標視窗。
+                    #
+                    # **解決方案**：在程式中連續執行兩次 focus 流程（Steps 7-8），
+                    # 模擬「第二次點擊」的效果，確保一次點擊就能成功 focus。
+                    #
+                    # Step 7: 再次發送 _NET_ACTIVE_WINDOW ClientMessage
+                    current_time = int(time.time() * 1000) & 0xFFFFFFFF
+                    ev = event.ClientMessage(
+                        window=target_window,
+                        client_type=active_window_atom,
+                        data=(32, [2, current_time, 0, 0, 0])
+                    )
+                    root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                    d.flush()
+                    time.sleep(0.05)
 
-                # Step 8: 再次 raise 和 focus
-                target_window.configure(stack_mode=X.Above)
-                target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
-                d.flush()
-                d.sync()
+                    # Step 8: 再次 raise 和 focus
+                    target_window.configure(stack_mode=X.Above)
+                    target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+                    d.flush()
+                    d.sync()
 
                 return True
 
@@ -803,56 +806,57 @@ class FocusManager:
             from Xlib.protocol import event
             import time
 
-            d = self._get_display()
-            root = d.screen().root
-            target_window = d.create_resource_object('window', int(window_id))
-            active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
+            with self._display_lock:
+                d = self._get_display()
+                root = d.screen().root
+                target_window = d.create_resource_object('window', int(window_id))
+                active_window_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
 
-            # Step 1: WM_CHANGE_STATE (取消最小化)
-            wm_state = d.intern_atom("WM_CHANGE_STATE")
-            ev = event.ClientMessage(
-                window=target_window,
-                client_type=wm_state,
-                data=(32, [1, 0, 0, 0, 0])
-            )
-            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
-            d.flush()
-            time.sleep(0.05)
+                # Step 1: WM_CHANGE_STATE (取消最小化)
+                wm_state = d.intern_atom("WM_CHANGE_STATE")
+                ev = event.ClientMessage(
+                    window=target_window,
+                    client_type=wm_state,
+                    data=(32, [1, 0, 0, 0, 0])
+                )
+                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                d.flush()
+                time.sleep(0.05)
 
-            # Step 2: _NET_ACTIVE_WINDOW ClientMessage
-            current_time = int(time.time() * 1000) & 0xFFFFFFFF
-            ev = event.ClientMessage(
-                window=target_window,
-                client_type=active_window_atom,
-                data=(32, [2, current_time, 0, 0, 0])
-            )
-            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
-            d.flush()
-            time.sleep(0.05)
+                # Step 2: _NET_ACTIVE_WINDOW ClientMessage
+                current_time = int(time.time() * 1000) & 0xFFFFFFFF
+                ev = event.ClientMessage(
+                    window=target_window,
+                    client_type=active_window_atom,
+                    data=(32, [2, current_time, 0, 0, 0])
+                )
+                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                d.flush()
+                time.sleep(0.05)
 
-            # Step 3: raise 視窗
-            target_window.configure(stack_mode=X.Above)
-            d.flush()
-            time.sleep(0.05)
+                # Step 3: raise 視窗
+                target_window.configure(stack_mode=X.Above)
+                d.flush()
+                time.sleep(0.05)
 
-            # Step 4: 設定 keyboard focus
-            target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
-            d.flush()
-            d.sync()
-            time.sleep(0.05)
+                # Step 4: 設定 keyboard focus
+                target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+                d.flush()
+                d.sync()
+                time.sleep(0.05)
 
-            # 雙重 Focus（Electron 應用需要）
-            current_time = int(time.time() * 1000) & 0xFFFFFFFF
-            ev = event.ClientMessage(
-                window=target_window,
-                client_type=active_window_atom,
-                data=(32, [2, current_time, 0, 0, 0])
-            )
-            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
-            target_window.configure(stack_mode=X.Above)
-            target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
-            d.flush()
-            d.sync()
+                # 雙重 Focus（Electron 應用需要）
+                current_time = int(time.time() * 1000) & 0xFFFFFFFF
+                ev = event.ClientMessage(
+                    window=target_window,
+                    client_type=active_window_atom,
+                    data=(32, [2, current_time, 0, 0, 0])
+                )
+                root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+                target_window.configure(stack_mode=X.Above)
+                target_window.set_input_focus(X.RevertToParent, X.CurrentTime)
+                d.flush()
+                d.sync()
 
             return True
 
@@ -2237,13 +2241,25 @@ class NotificationContainer(Gtk.Window):
         return shortcut_container
 
     def refresh_shortcut_bar(self):
-        """重新載入 IDE 視窗快捷按鈕"""
+        """重新載入 IDE 視窗快捷按鈕（非阻塞）
+
+        scan_open_ide_windows() 需要多次呼叫 xdotool subprocess，
+        在 main thread 執行會阻塞 GTK main loop 導致視窗無回應。
+        改為在背景 thread 掃描，完成後用 GLib.idle_add 回到 main thread 更新 UI。
+        """
+        def scan_thread():
+            ide_windows = self.focus_manager.scan_open_ide_windows()
+            GLib.idle_add(self._update_shortcut_buttons, ide_windows)
+
+        thread = threading.Thread(target=scan_thread, daemon=True)
+        thread.start()
+        return False  # GLib.idle_add 只執行一次
+
+    def _update_shortcut_buttons(self, ide_windows):
+        """在 main thread 更新快捷列按鈕（由 refresh_shortcut_bar 的背景 thread 回呼）"""
         # 清除現有按鈕
         for child in self.shortcut_buttons_box.get_children():
             self.shortcut_buttons_box.remove(child)
-
-        # 掃描開著的 IDE 視窗
-        ide_windows = self.focus_manager.scan_open_ide_windows()
 
         if not ide_windows:
             # 沒有開著的 IDE 視窗，顯示提示
