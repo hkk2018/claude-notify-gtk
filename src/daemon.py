@@ -9,7 +9,8 @@ Claude Code 通知守護程式
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Gdk, GdkPixbuf
+gi.require_version('AppIndicator3', '0.1')
+from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, AppIndicator3
 import json
 import datetime
 import subprocess
@@ -33,6 +34,7 @@ FOCUS_MAPPING_FILE = CONFIG_DIR / "focus-mapping.json"
 PROJECT_ROOT = Path(__file__).parent.parent
 DEBUG_LOG_DIR = PROJECT_ROOT / "log"
 DEBUG_LOG_FILE = DEBUG_LOG_DIR / "debug.log"
+CRASH_LOG_FILE = DEBUG_LOG_DIR / "crash.log"
 
 
 def debug_log(message, data=None):
@@ -2475,98 +2477,57 @@ class NotificationContainer(Gtk.Window):
         )
 
     def create_tray_icon(self):
-        """創建系統托盤圖標
+        """創建系統托盤圖標（使用 AppIndicator3）
 
-        針對系統托盤圖標對齊問題的改進：
-        1. 使用明確大小的 pixbuf（22x22）而非 symbolic icon
-        2. 支援自訂圖標檔案（優先）
-        3. Fallback 到非 symbolic 系統圖標（對齊較好）
+        AppIndicator3 是 GNOME 3+ 上正確的系統托盤實現，
+        取代已 deprecated 的 Gtk.StatusIcon。
+        需要 ubuntu-appindicators extension（Ubuntu 預設啟用）。
         """
-        # 使用 StatusIcon (GTK3)
-        self.status_icon = Gtk.StatusIcon()
-
-        # 嘗試使用自訂圖標檔案（如果存在）
+        # 決定圖標
         icon_path = PROJECT_ROOT / "assets" / "icon.png"
         if icon_path.exists():
-            # 從檔案載入，並設定大小為 22x22（標準托盤圖標尺寸）
-            # 這樣可以確保圖標在托盤中正確對齊
-            try:
-                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
-                    str(icon_path),
-                    22, 22,  # 標準托盤圖標尺寸
-                    True     # preserve aspect ratio
-                )
-                self.status_icon.set_from_pixbuf(pixbuf)
-                debug_log("✅ 使用自訂托盤圖標", {"path": str(icon_path)})
-            except Exception as e:
-                debug_log(f"⚠️ 載入自訂圖標失敗: {e}")
-                # Fallback to system icon (non-symbolic for better alignment)
-                self.status_icon.set_from_icon_name("notification-message-im")
+            # 使用自訂圖標（AppIndicator 需要絕對路徑，不含副檔名）
+            # 但 icon_theme_path 模式需要目錄和圖標名稱分開
+            icon_dir = str(icon_path.parent)
+            icon_name = icon_path.stem  # "icon" (不含 .png)
+            self.indicator = AppIndicator3.Indicator.new(
+                "claude-notify-gtk",
+                icon_name,
+                AppIndicator3.IndicatorCategory.APPLICATION_STATUS
+            )
+            self.indicator.set_icon_theme_path(icon_dir)
+            debug_log("✅ 使用自訂托盤圖標 (AppIndicator3)", {"path": str(icon_path)})
         else:
-            # 使用系統圖標（非 symbolic，對齊較好）
-            # symbolic icon 在某些系統托盤實現上可能會有對齊問題
-            # 優先嘗試清單：notification 相關圖標
-            icon_names = [
-                "notification-message-im",     # 訊息通知
-                "notification-new",            # 新通知
-                "dialog-information",          # 資訊對話框
-                "mail-unread",                 # 未讀郵件
-                "emblem-important"             # 重要標記
-            ]
+            # Fallback 到系統圖標
+            self.indicator = AppIndicator3.Indicator.new(
+                "claude-notify-gtk",
+                "dialog-information",
+                AppIndicator3.IndicatorCategory.APPLICATION_STATUS
+            )
+            debug_log("✅ 使用系統圖標 (AppIndicator3): dialog-information")
 
-            icon_theme = Gtk.IconTheme.get_default()
-            icon_found = False
-            for icon_name in icon_names:
-                if icon_theme.has_icon(icon_name):
-                    self.status_icon.set_from_icon_name(icon_name)
-                    icon_found = True
-                    debug_log(f"✅ 使用系統圖標: {icon_name}")
-                    break
+        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_title("Claude Code Notifier")
 
-            if not icon_found:
-                # 最後 fallback
-                self.status_icon.set_from_icon_name("application-x-executable")
-                debug_log("⚠️ 使用 fallback 圖標: application-x-executable")
-
-        self.status_icon.set_tooltip_text("Claude Code Notifier")
-        self.status_icon.set_visible(True)
-
-        # 連接事件
-        self.status_icon.connect("activate", self.on_tray_activate)
-        self.status_icon.connect("popup-menu", self.on_tray_popup_menu)
-
-    def on_tray_activate(self, status_icon):
-        """托盤圖標左鍵點擊 - 切換視窗顯示/隱藏"""
-        if self.get_visible():
-            self.hide()
-        else:
-            self.show_all()
-            self.present()
-
-    def on_tray_popup_menu(self, status_icon, button, activate_time):
-        """托盤圖標右鍵選單"""
+        # AppIndicator3 必須設定 menu（不像 StatusIcon 有 activate signal）
         menu = Gtk.Menu()
 
-        # Show Window 選項
         show_item = Gtk.MenuItem(label="顯示視窗 (Show)")
         show_item.connect("activate", lambda x: self.show_window())
         menu.append(show_item)
 
-        # Hide Window 選項
         hide_item = Gtk.MenuItem(label="隱藏視窗 (Hide)")
         hide_item.connect("activate", lambda x: self.hide())
         menu.append(hide_item)
 
-        # 分隔線
         menu.append(Gtk.SeparatorMenuItem())
 
-        # Quit Daemon 選項 - 明確標示會停止背景服務
         quit_item = Gtk.MenuItem(label="結束服務 (Quit Daemon)")
         quit_item.connect("activate", self.on_quit)
         menu.append(quit_item)
 
         menu.show_all()
-        menu.popup(None, None, None, None, button, activate_time)
+        self.indicator.set_menu(menu)
 
     def show_window(self):
         """顯示視窗"""
@@ -3213,23 +3174,67 @@ def detect_display_environment():
     return info
 
 
+def setup_crash_logging():
+    """將 stderr 導向 crash log 檔案，用於追蹤未捕獲的異常和 GTK 錯誤"""
+    import sys
+    DEBUG_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 輪替：超過 2MB 就備份
+    max_size = 2 * 1024 * 1024
+    if CRASH_LOG_FILE.exists() and CRASH_LOG_FILE.stat().st_size > max_size:
+        backup = CRASH_LOG_FILE.with_suffix('.log.1')
+        if backup.exists():
+            backup.unlink()
+        CRASH_LOG_FILE.rename(backup)
+
+    crash_fd = open(CRASH_LOG_FILE, 'a', encoding='utf-8')
+    # 寫入啟動標記
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    crash_fd.write(f"\n{'='*60}\n")
+    crash_fd.write(f"[{timestamp}] Daemon started (PID {os.getpid()})\n")
+    crash_fd.flush()
+    sys.stderr = crash_fd
+    return crash_fd
+
+
 def main():
     """主程式"""
-    # 偵測並設定顯示環境
-    display_info = detect_display_environment()
+    # 設定 crash log — 捕獲所有 stderr 輸出（含 GTK 警告、未捕獲異常）
+    crash_fd = setup_crash_logging()
 
-    # 記錄環境偵測結果
-    debug_log("🖥️ 顯示環境偵測", display_info)
+    try:
+        # 偵測並設定顯示環境
+        display_info = detect_display_environment()
 
-    if display_info["actions"]:
-        for action in display_info["actions"]:
-            print(f"Display setup: {action}")
+        # 記錄環境偵測結果
+        debug_log("🖥️ 顯示環境偵測", display_info)
 
-    container = NotificationContainer()
-    container.show_all()
-    container.hide()  # 一開始隱藏，等有通知才顯示
+        if display_info["actions"]:
+            for action in display_info["actions"]:
+                print(f"Display setup: {action}")
 
-    Gtk.main()
+        container = NotificationContainer()
+        container.show_all()
+        container.hide()  # 一開始隱藏，等有通知才顯示
+
+        Gtk.main()
+    except Exception as e:
+        # 頂層 exception handler — 確保 crash 被記錄
+        import traceback
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        crash_msg = f"\n[{timestamp}] ❌ FATAL: Unhandled exception\n{traceback.format_exc()}\n"
+        try:
+            crash_fd.write(crash_msg)
+            crash_fd.flush()
+        except:
+            pass
+        debug_log("❌ FATAL: Daemon crashed", {"error": str(e), "traceback": traceback.format_exc()})
+        raise
+    finally:
+        try:
+            crash_fd.close()
+        except:
+            pass
 
 
 if __name__ == "__main__":
