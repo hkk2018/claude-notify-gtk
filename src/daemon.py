@@ -2572,7 +2572,7 @@ class NotificationContainer(Gtk.Window):
         return False
 
     def on_drag_start(self, widget, event):
-        """開始拖拉"""
+        """開始拖拉 - 使用 WM 內建拖動"""
         if event.button == 1:  # 左鍵
             # 檢查是否在邊緣區域（調整大小優先）
             win_x, win_y = self.get_position()
@@ -2582,9 +2582,13 @@ class NotificationContainer(Gtk.Window):
                 edge = self.get_edge_at_position(window_rel_x, window_rel_y)
                 if edge:
                     return False  # 讓 resize 處理
-            self.is_dragging = True
-            self.drag_start_x = event.x_root
-            self.drag_start_y = event.y_root
+            # 委託給 Window Manager 處理拖動
+            self.begin_move_drag(
+                event.button,
+                int(event.x_root),
+                int(event.y_root),
+                event.time
+            )
             return True
         return False
 
@@ -2596,23 +2600,7 @@ class NotificationContainer(Gtk.Window):
         return False
 
     def on_drag_motion(self, widget, event):
-        """拖拉移動"""
-        if self.is_dragging:
-            # 計算移動距離
-            delta_x = event.x_root - self.drag_start_x
-            delta_y = event.y_root - self.drag_start_y
-
-            # 獲取當前視窗位置
-            win_x, win_y = self.get_position()
-
-            # 移動視窗
-            self.move(int(win_x + delta_x), int(win_y + delta_y))
-
-            # 更新起始位置
-            self.drag_start_x = event.x_root
-            self.drag_start_y = event.y_root
-
-            return True
+        """拖拉移動 - 已由 WM begin_move_drag 處理，此處僅保留介面相容"""
         return False
 
     def get_edge_at_position(self, x, y):
