@@ -2827,7 +2827,7 @@ class NotificationContainer(Gtk.Window):
 
     @staticmethod
     def play_sound(sound_name):
-        """播放音效"""
+        """播放音效（在 thread 中 wait 子進程，避免 zombie / fd 洩漏）"""
         sound_files = [
             f"/usr/share/sounds/freedesktop/stereo/{sound_name}.oga",
             f"/usr/share/sounds/freedesktop/stereo/{sound_name}.wav"
@@ -2836,19 +2836,30 @@ class NotificationContainer(Gtk.Window):
         for sound_file in sound_files:
             if os.path.exists(sound_file):
                 if sound_file.endswith(".oga"):
-                    subprocess.Popen(["paplay", sound_file],
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL)
+                    cmd = ["paplay", sound_file]
                 elif sound_file.endswith(".wav"):
-                    subprocess.Popen(["aplay", sound_file],
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL)
+                    cmd = ["aplay", sound_file]
+                else:
+                    continue
+
+                def _play(cmd):
+                    try:
+                        proc = subprocess.Popen(cmd,
+                                               stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.DEVNULL)
+                        proc.wait(timeout=10)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_play, args=(cmd,), daemon=True).start()
                 break
 
     def start_socket_server(self):
         """啟動 Unix socket 伺服器接收通知"""
         self.socket_server = None
         self.socket_healthy = True
+        self._socket_restart_count = 0
+        self._socket_restart_max = 5  # 連續重啟上限，避免失敗循環加速 fd 耗盡
 
         def server_thread():
             # 移除舊的 socket
@@ -2858,6 +2869,9 @@ class NotificationContainer(Gtk.Window):
             self.socket_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.socket_server.bind(SOCKET_PATH)
             self.socket_server.listen(5)
+
+            # 重啟成功，重置計數器
+            self._socket_restart_count = 0
 
             while True:
                 try:
@@ -2878,22 +2892,121 @@ class NotificationContainer(Gtk.Window):
         thread.start()
 
         # 啟動 health check watchdog
-        GLib.timeout_add_seconds(30, self.check_socket_health)
+        GLib.timeout_add_seconds(300, self.check_socket_health)
 
     def check_socket_health(self):
         """定期檢查 socket 是否健康，異常時自動重啟"""
+        # 同時檢查 fd 使用量
+        self._check_fd_usage()
+
         try:
             # 嘗試連線測試
             test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            test_sock.settimeout(2)
-            test_sock.connect(SOCKET_PATH)
-            test_sock.close()
-            debug_log("✅ Socket health check passed")
+            try:
+                test_sock.settimeout(2)
+                test_sock.connect(SOCKET_PATH)
+            finally:
+                test_sock.close()
+            self._socket_restart_count = 0  # 健康，重置計數
             return True  # 繼續定時檢查
         except Exception as e:
-            debug_log("⚠️ Socket health check failed, restarting...", {"error": str(e)})
+            if self._socket_restart_count >= self._socket_restart_max:
+                debug_log("🛑 Socket restart limit reached, stop retrying", {
+                    "restart_count": self._socket_restart_count,
+                    "error": str(e)
+                })
+                # 顯示告警通知
+                GLib.idle_add(self._show_fd_alert,
+                    "Socket 重啟失敗次數已達上限",
+                    f"連續 {self._socket_restart_count} 次重啟失敗，可能是 fd 耗盡。\n建議重啟 daemon。")
+                return True  # 繼續監控但不再重啟
+            debug_log("⚠️ Socket health check failed, restarting...", {
+                "error": str(e),
+                "restart_count": self._socket_restart_count
+            })
+            self._socket_restart_count += 1
             self.restart_socket_server()
             return True  # 繼續定時檢查
+
+    def _check_fd_usage(self):
+        """檢查 fd 使用量，達到 50% 時顯示告警（每 10 分鐘最多一次）"""
+        try:
+            import resource
+            now = datetime.datetime.now()
+
+            # 去重：每 10 分鐘最多告警一次
+            if hasattr(self, '_last_fd_alert_time') and self._last_fd_alert_time:
+                if (now - self._last_fd_alert_time).total_seconds() < 600:
+                    return
+
+            soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            pid = os.getpid()
+            fd_dir = f"/proc/{pid}/fd"
+            if not os.path.exists(fd_dir):
+                return
+            fd_count = len(os.listdir(fd_dir))
+            usage_pct = fd_count / soft_limit * 100
+
+            if usage_pct >= 50:
+                self._last_fd_alert_time = now
+                # 分析 fd 用途
+                fd_summary = self._analyze_fd_usage(fd_dir)
+                alert_msg = (
+                    f"FD 使用量: {fd_count}/{soft_limit} ({usage_pct:.0f}%)\n"
+                    f"FD 分布:\n{fd_summary}"
+                )
+                debug_log("🚨 FD usage alert", {
+                    "fd_count": fd_count,
+                    "soft_limit": soft_limit,
+                    "usage_pct": f"{usage_pct:.1f}%",
+                    "summary": fd_summary
+                })
+                GLib.idle_add(self._show_fd_alert,
+                    f"⚠️ FD 使用量過高 ({usage_pct:.0f}%)",
+                    alert_msg)
+        except Exception as e:
+            debug_log("⚠️ FD check failed", {"error": str(e)})
+
+    def _analyze_fd_usage(self, fd_dir):
+        """分析 fd 用途，回傳人可讀的摘要"""
+        categories = {}
+        try:
+            for fd_name in os.listdir(fd_dir):
+                try:
+                    link = os.readlink(os.path.join(fd_dir, fd_name))
+                    if link.startswith("socket:"):
+                        cat = "socket"
+                    elif link.startswith("pipe:"):
+                        cat = "pipe"
+                    elif link.startswith("anon_inode:"):
+                        cat = "anon_inode"
+                    elif link == "/dev/null":
+                        cat = "/dev/null"
+                    elif link.startswith("/"):
+                        cat = f"file: {link}"
+                    else:
+                        cat = f"other: {link}"
+                    categories[cat] = categories.get(cat, 0) + 1
+                except (OSError, FileNotFoundError):
+                    categories["(unreadable)"] = categories.get("(unreadable)", 0) + 1
+        except Exception:
+            return "(analysis failed)"
+
+        # 按數量排序，前 10 項
+        sorted_cats = sorted(categories.items(), key=lambda x: -x[1])
+        lines = [f"  {count:>4}x  {cat}" for cat, count in sorted_cats[:10]]
+        return "\n".join(lines)
+
+    def _show_fd_alert(self, title, message):
+        """在通知窗口顯示 fd 告警（作為最高優先級通知）"""
+        alert_data = {
+            "message": message,
+            "notification_type": "fd_alert",
+            "cwd": str(PROJECT_ROOT),
+            "hook_event_name": "SystemAlert",
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.handle_notification(alert_data)
 
     def restart_socket_server(self):
         """重啟 socket server"""
@@ -2981,7 +3094,12 @@ class NotificationContainer(Gtk.Window):
 
         # 根據通知類型設定標題、緊急程度和音效
         # V0/V1/V2 都使用相同的標題邏輯
-        if notification_type == "permission_prompt":
+        if notification_type == "fd_alert":
+            title_v0 = f"🚨 [System] FD Alert"
+            title_v1 = "🚨 FD Alert"
+            urgency = "critical"
+            sound = "dialog-error"
+        elif notification_type == "permission_prompt":
             title_v0 = f"🔐 [{project_name}] Permission"
             title_v1 = "🔐 Permission"
             urgency = "critical"
